@@ -1,0 +1,148 @@
+{
+ "name": "hnet_64x",
+ "frames": 36000,
+ "hours": 1.0,
+ "flops_total": {
+  "frame_enc+heads": 2015004672000.0,
+  "level1": 254795710464.0,
+  "level2": 52038107136.0,
+  "main": 15627223040.0
+ },
+ "gflops_per_frame_mean": 0.06492960312888889,
+ "gflops_per_frame_idle": 0.06434830363108454,
+ "gflops_per_frame_active": 0.06556046662465245,
+ "gflops_per_frame_last1000": 0.06541910425599999,
+ "latency_ms": {
+  "mean": 2.3373603441309068,
+  "p50": 2.097524000419071,
+  "p99": 5.122744629479714,
+  "max": 11.64932800020324
+ },
+ "events_per_level": [
+  3209,
+  299
+ ],
+ "events_per_hour": [
+  3209.0,
+  299.0
+ ],
+ "state": {
+  "t": 36000,
+  "windows": 655360,
+  "main_kv": 4898816,
+  "main_tokens": 299
+ },
+ "state_growth": [
+  {
+   "t": 2048,
+   "windows": 655360,
+   "main_kv": 262144,
+   "main_tokens": 16
+  },
+  {
+   "t": 4096,
+   "windows": 655360,
+   "main_kv": 557056,
+   "main_tokens": 34
+  },
+  {
+   "t": 6144,
+   "windows": 655360,
+   "main_kv": 901120,
+   "main_tokens": 55
+  },
+  {
+   "t": 8192,
+   "windows": 655360,
+   "main_kv": 1261568,
+   "main_tokens": 77
+  },
+  {
+   "t": 10240,
+   "windows": 655360,
+   "main_kv": 1638400,
+   "main_tokens": 100
+  },
+  {
+   "t": 12288,
+   "windows": 655360,
+   "main_kv": 1884160,
+   "main_tokens": 115
+  },
+  {
+   "t": 14336,
+   "windows": 655360,
+   "main_kv": 2424832,
+   "main_tokens": 148
+  },
+  {
+   "t": 16384,
+   "windows": 655360,
+   "main_kv": 2621440,
+   "main_tokens": 160
+  },
+  {
+   "t": 18432,
+   "windows": 655360,
+   "main_kv": 2850816,
+   "main_tokens": 174
+  },
+  {
+   "t": 20480,
+   "windows": 655360,
+   "main_kv": 2998272,
+   "main_tokens": 183
+  },
+  {
+   "t": 22528,
+   "windows": 655360,
+   "main_kv": 3260416,
+   "main_tokens": 199
+  },
+  {
+   "t": 24576,
+   "windows": 655360,
+   "main_kv": 3555328,
+   "main_tokens": 217
+  },
+  {
+   "t": 26624,
+   "windows": 655360,
+   "main_kv": 3686400,
+   "main_tokens": 225
+  },
+  {
+   "t": 28672,
+   "windows": 655360,
+   "main_kv": 3833856,
+   "main_tokens": 234
+  },
+  {
+   "t": 30720,
+   "windows": 655360,
+   "main_kv": 4145152,
+   "main_tokens": 253
+  },
+  {
+   "t": 32768,
+   "windows": 655360,
+   "main_kv": 4374528,
+   "main_tokens": 267
+  },
+  {
+   "t": 34816,
+   "windows": 655360,
+   "main_kv": 4702208,
+   "main_tokens": 287
+  },
+  {
+   "t": 36000,
+   "windows": 655360,
+   "main_kv": 4898816,
+   "main_tokens": 299
+  }
+ ],
+ "memory_acc": 0.38095238095238093,
+ "n_queries": 21,
+ "act_mse_moving": 0.013313689269125462
+}

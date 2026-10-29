@@ -1,0 +1,5 @@
+# torch/torchvision: install from https://download.pytorch.org/whl/cu128 (tested torch==2.11.0, torchvision==0.26.0)
+numpy==2.5.4
+matplotlib==3.11.2
+einops==0.8.2
+tqdm==4.70.1

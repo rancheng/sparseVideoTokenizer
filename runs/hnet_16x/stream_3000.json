@@ -1,0 +1,52 @@
+{
+ "name": "hnet_16x",
+ "frames": 3000,
+ "hours": 0.08333333333333333,
+ "flops_total": {
+  "frame_enc+heads": 167917056000.0,
+  "level1": 21225406464.0,
+  "level2": 8681619456.0,
+  "main": 6095831040.0
+ },
+ "gflops_per_frame_mean": 0.06797330432,
+ "gflops_per_frame_idle": 0.06717423791542858,
+ "gflops_per_frame_active": 0.0690919972864,
+ "gflops_per_frame_last1000": 0.067733590016,
+ "latency_ms": {
+  "mean": 6.669246893315479,
+  "p50": 5.598237499725656,
+  "p99": 14.706798288862014,
+  "max": 205.23336199767073
+ },
+ "events_per_level": [
+  536,
+  120
+ ],
+ "events_per_hour": [
+  6432.0,
+  1440.0
+ ],
+ "state": {
+  "t": 3000,
+  "windows": 655360,
+  "main_kv": 1966080,
+  "main_tokens": 120
+ },
+ "state_growth": [
+  {
+   "t": 2048,
+   "windows": 655360,
+   "main_kv": 1327104,
+   "main_tokens": 81
+  },
+  {
+   "t": 3000,
+   "windows": 655360,
+   "main_kv": 1966080,
+   "main_tokens": 120
+  }
+ ],
+ "memory_acc": 0.0,
+ "n_queries": 2,
+ "act_mse_moving": 0.015388129279017448
+}
