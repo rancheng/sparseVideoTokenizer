@@ -172,8 +172,10 @@ of KV cache.
 ![timeline](figures/timeline.png)
 
 **Level 1 (hnet_16x).** The router probability `p_t` is pinned at the 0.5 threshold.
-- While idle, 98% of `p_t` values lie within −0.006 / +0.003 of 0.5. It only swings to about 0.37–0.61
+- While idle, the median |p_t − 0.5| is 0.0026, and 83% of idle frames (10-min window) lie within ±0.006. It only swings to about 0.37–0.61
   while the robot moves.
+- |p_t − 0.5| separates moving from idle frames well (AUC ≈ 0.90), but with no consistent sign, so the 0.5
+  threshold cuts straight through the signal.
 - Boundaries are therefore close to coin flips. It fires on about 23% of idle frames: 140 tokens/min
   idle vs 151 active.
 - Event recall equals that of random boundaries at the same rate (≈0.86 vs 0.86).
