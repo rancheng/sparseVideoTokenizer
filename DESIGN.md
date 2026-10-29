@@ -59,7 +59,7 @@ Key design decisions. All are implemented in `vt/model.py` and exercised in the 
 * **Router.** This is H-Net routing: `p_t = ½(1 − cos(W_q x_t, W_k x_{t−1}))`, `b_t = [p_t ≥ ½]`, with the
   ratio loss `L = N/(N−1)·((N−1)FG + (1−F)(1−G))`, α = 0.03. **A video-specific change: `W_q, W_k` are
   randomly initialised, not set to the identity.** Adjacent frames are near-identical, so the identity init
-  gives p≈0 and the router never wakes up (observed).
+  gives p≈0 and the router never wakes up (observed). Independent random init then leaves p≈0.5 (q ⊥ k), so the router barely discriminates (see docs/experiment-log.md). A tied or temperature-scaled init is the planned fix.
 * **Heartbeat boundaries.** A boundary is forced whenever absolute time crosses a multiple of M_l frames
   (64 / 256 here). This bounds the staleness of the main network's view, which matters for a control loop.
   It also prevents collapse to zero tokens and costs only 3600·10/M tokens per hour.

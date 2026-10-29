@@ -6,3 +6,4 @@ runs/**/*.npz
 runs/_v0/
 *.log
 !runs/**/stdout.log
+viz/.cache/
