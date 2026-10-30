@@ -3,7 +3,7 @@ import argparse, json, math, os, time
 import numpy as np
 import torch
 import torch.nn.functional as F
-from vt.env2 import simulate, ClipSampler, G, CARRY, BINS
+from vt.env2 import simulate, ClipSampler, G, CARRY, BINS, EV_EXIT
 from vt.model2 import SparseVideoModel, to_cells
 
 p = argparse.ArgumentParser()
@@ -21,10 +21,19 @@ p.add_argument("--T", type=int, default=2048)
 p.add_argument("--lr", type=float, default=3e-4)
 p.add_argument("--warmup", type=int, default=300)
 p.add_argument("--alpha", type=float, default=0.03, help="temporal ratio loss weight")
+p.add_argument("--fov_credit", default="ste", choices=["ste", "task"], help="fovea score: straight-through on picked "
+               "cells from every loss (ste), or regress the counterfactual action-loss benefit on every event cell (task)")
+p.add_argument("--fov_pos", action="store_true", help="fovea score also sees the cell position")
+p.add_argument("--fov_explore", type=float, default=1.0, help="task credit: Gumbel temperature of the training-time top-k")
+p.add_argument("--w_fov", type=float, default=0.1, help="task credit: weight of the fovea value regression")
 p.add_argument("--alpha_s", type=float, default=0.05, help="spatial (cell router, fovea) ratio loss weight")
 p.add_argument("--w_pix", type=float, default=1.0, help="weight on the per-cell forward-model NLL")
 p.add_argument("--w_dec", type=float, default=1.0, help="weight of the decision-frame action loss (own mean)")
 p.add_argument("--n_dec", type=int, default=2048, help="cells decoded per step (half of them changing cells)")
+p.add_argument("--pop_exit", action="store_true", help="env: items pop out of the tunnel in one frame (memory-only exit)")
+p.add_argument("--rule_mode", default="mirror", choices=["mirror", "pair"], help="env: glyph x rule -> bin mapping")
+p.add_argument("--w_main", type=float, default=0.0, help="weight of the main network's next-event-token loss (0 = off)")
+p.add_argument("--n_exit", type=int, default=0, help="extra decoded cells per step at tunnel-exit frames (exit cells)")
 p.add_argument("--delay", default="150,600", help="tunnel transit time range (frames)")
 p.add_argument("--n_env", type=int, default=64)
 p.add_argument("--act_drop", type=float, default=0.3)
@@ -42,9 +51,10 @@ args = p.parse_args()
 torch.manual_seed(args.seed)
 out_dir = f"runs2/{args.name}"; os.makedirs(out_dir, exist_ok=True)
 chunkers = args.chunkers.split(","); Ns = [int(n) for n in args.Ns.split(",")]
-front = dict(router=args.router, fovea=args.fovea, N_cell=args.N_cell, k_fov=args.k_fov, k_max=args.k_max)
+front = dict(router=args.router, fovea=args.fovea, N_cell=args.N_cell, k_fov=args.k_fov, k_max=args.k_max,
+             fov_credit=args.fov_credit, fov_pos=args.fov_pos, fov_explore=args.fov_explore)
 temporal = dict(chunkers=chunkers, Ns=Ns, dims=[256, 384, 512][: len(chunkers) + 1] if chunkers != ["all"] else [256, 512],
-                router="tied", alibi=True, mem_read=True, mem_src="tok")
+                router="tied", alibi=True, mem_read=True, mem_src="tok", main_pred=args.w_main > 0)
 cfg = dict(front=front, temporal=temporal)
 model = SparseVideoModel(front, temporal).cuda()
 if args.init:
@@ -52,11 +62,11 @@ if args.init:
 print(f"params {sum(q.numel() for q in model.parameters())/1e6:.1f}M", cfg, flush=True)
 
 delay = tuple(int(v) for v in args.delay.split(","))
-st = simulate(args.n_env, 30000, seed=1000 + args.seed, delay=delay)
+st = simulate(args.n_env, 30000, seed=1000 + args.seed, delay=delay, pop_exit=args.pop_exit, rule_mode=args.rule_mode)
 sampler = ClipSampler(st, args.T, seed=args.seed)
 main_sampler = sampler
 if args.rule_curr:
-    sampler = ClipSampler(simulate(args.n_env, 30000, seed=2000 + args.seed, delay=delay, rule_fixed=0), args.T, seed=args.seed, rule_fixed=True)
+    sampler = ClipSampler(simulate(args.n_env, 30000, seed=2000 + args.seed, delay=delay, rule_fixed=0, pop_exit=args.pop_exit, rule_mode=args.rule_mode), args.T, seed=args.seed, rule_fixed=True)
 BINS_T = torch.as_tensor(BINS, device="cuda")
 
 rp = [q for n, q in model.named_parameters() if n.endswith(("wq.weight", "wk.weight"))]
@@ -88,6 +98,12 @@ def step_loss(frames, clean, act, ev):
         pick_c = flat_chg[torch.randint(0, max(1, len(flat_chg)), (n,), device=h.device)] if len(flat_chg) else torch.zeros(0, dtype=torch.long, device=h.device)
         pick_u = torch.randint(0, B * T * G * G, (n,), device=h.device)
         pick = torch.cat([pick_c, pick_u])
+        if args.n_exit:  # the exit frame: the two cells the item pops into
+            ex = ((ev[:, :T] & EV_EXIT) > 0).flatten().nonzero()[:, 0]
+            if len(ex):
+                pe = ex[torch.randint(0, len(ex), (args.n_exit,), device=h.device)]
+                je = torch.tensor([6, G + 6], device=h.device)[torch.randint(0, 2, (args.n_exit,), device=h.device)]
+                pick = torch.cat([pick, pe * (G * G) + je])
         bi, ti_, ji = pick // (T * G * G), (pick // (G * G)) % T, pick % (G * G)
         cur = to_cells(obs)[bi, ti_, ji]
         pred, logv = model.cdec(z[bi, ti_], fi["cell"][bi, ti_, ji], ji, cur, with_var=True)
@@ -122,9 +138,23 @@ def step_loss(frames, clean, act, ev):
     b, pr = fi["b"], fi["p"]
     if args.router in ("tied", "rel"):
         ratio_s = ratio_s + hnet_ratio(b.float().mean(), pr.float().mean(), args.N_cell)
-    if args.fovea == "learned" and fi["use"].any() and not model.front.force_fovea:
+    if args.fovea == "learned" and args.fov_credit == "ste" and fi["use"].any() and not model.front.force_fovea:
         ratio_s = ratio_s + fi["gate_soft"][fi["use"]].float().mean()  # small pull on selected scores: useless picks rotate out
-    loss = args.w_pix * nll + a_mse + 0.1 * a_ang + args.w_dec * 0.1 * a_dec + 0.1 * g_bce + args.alpha * ratio_t + args.alpha_s * ratio_s
+    task = a_mse + 0.1 * a_ang + args.w_dec * 0.1 * a_dec + 0.1 * g_bce
+    loss = args.w_pix * nll + task + args.alpha * ratio_t + args.alpha_s * ratio_s
+    main_l = model.temporal.main.pred_loss if args.w_main > 0 else None
+    if main_l is not None:
+        loss = loss + args.w_main * main_l
+    fov_loss = torch.zeros((), device=h.device)
+    if args.fovea == "learned" and args.fov_credit == "task":
+        # value of high resolution per event cell = -d(action losses)/d(gate), first order, pixels excluded: the noisy TV
+        # helps next-frame pixels but not actions. RMS-normalised per batch; the score regresses its conditional mean
+        gate, ev_m = fi["fov_gate"], b
+        gr, = torch.autograd.grad(task, gate, retain_graph=True, allow_unused=True)
+        ben = -gr.float() if gr is not None else torch.zeros_like(gate)
+        ben = (ben / (ben[ev_m].pow(2).mean().sqrt() + 1e-12)).clamp(-5, 5)
+        fov_loss = (fi["fov_v"].float() - ben)[ev_m].pow(2).mean()
+        loss = loss + args.w_fov * fov_loss
     with torch.no_grad():
         dirs = BINS_T[None, None] - sampler.last_agent[:, :T, None]                      # (B,T,4,2)
         dirs = dirs / (dirs.norm(dim=-1, keepdim=True) + 1e-6)
@@ -132,10 +162,11 @@ def step_loss(frames, clean, act, ev):
         dec_acc = (pick == sampler.last_bin[:, :T])[dec].float().mean().item() if dec.any() else None
         tv = sampler.last_tv; jt = tv[:, 1] * G + tv[:, 0]
         tv_ev = b[torch.arange(B), :, jt].float().mean().item()
+        tv_hr = fi["use"][torch.arange(B), :, jt].float().mean().item()
         comp = [(ti[0]["valid"].float().sum() / i["b"].float().sum()).item() for i in ti]
     return loss, dict(loss=loss.item(), mse=mse.item(), nll=nll.item(), a_mse=a_mse.item(), a_dec=a_dec.item(), a_ang=a_ang.item(), g_bce=g_bce.item(), ratio_t=float(ratio_t),
-                      ratio_s=float(ratio_s), ev_rate=b.float().mean().item(), hires_rate=fi["use"].float().mean().item(),
-                      tv_ev=tv_ev, dec_acc=dec_acc, comp=comp)
+                      ratio_s=float(ratio_s), fov_loss=float(fov_loss), main_l=float(main_l) if main_l is not None else 0.0, ev_rate=b.float().mean().item(), hires_rate=fi["use"].float().mean().item(),
+                      tv_ev=tv_ev, tv_hr=tv_hr, dec_acc=dec_acc, comp=comp)
 
 
 log = []
@@ -154,7 +185,7 @@ for s in range(args.steps):
             sampler = main_sampler; print(f"curriculum: step {s} -> rule flashes", flush=True)
     for (s0, T_, B_, f_, r_) in stages:
         if s == s0:
-            st_ = simulate(args.n_env, 30000, seed=1000 + args.seed + s0, delay=delay, **RULES[r_])
+            st_ = simulate(args.n_env, 30000, seed=1000 + args.seed + s0, delay=delay, pop_exit=args.pop_exit, rule_mode=args.rule_mode, **RULES[r_])
             sampler = ClipSampler(st_, T_, seed=args.seed + s0, rule_fixed=(r_ == "fixed"))
             B, focus = B_, f_
             print(f"stage: step {s} -> T {T_} B {B_} focus {f_} rule {r_}", flush=True)

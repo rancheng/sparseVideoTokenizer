@@ -200,3 +200,48 @@ This is now the first item in [future-plans.md](future-plans.md).
   about 12 L2 tokens on a single return-from-bin motion.
 
 ![token rate](figures/token_rate.png)
+
+## v3–v4: making memory learn (temporal model, `vt/model.py`)
+
+v3 (tied router, calibrated threshold, ALiBi, memory read) scored **52%** on held-out hour memory queries (n = 147;
+chance 25%), against fixed 94% and isotropic 100% on training memory. Three diagnoses, each measured:
+
+1. **Main outputs overwrite the event.** A linear probe of the main network's output at the first token after the
+   cue read the cue at 18% (fixed) and 54% (hnet). The output is a contextualised mix, not the event itself.
+2. **The memory read could only relay.** It read main outputs, so it could only return what main had already kept.
+3. **Content-adaptive chunking breaks the relay.** The tokens entering main still carried the cue at +50 / +200
+   frames with fixed chunking (0.89), but not with learned chunking (0.46 / 0.50): learned boundaries move with content.
+
+**Fix (`--mem_src tok`):** memory entries are `[RMSNorm(main input token), main output]`. The input token is the
+event as it happened; the output is its context. `MainNet` keeps both (`self.last`), and the streaming engine
+appends the same entry.
+
+| run (held-out hour, n = 147 queries) | memory acc | dynamic PSNR | action MSE |
+|---|---|---|---|
+| hnet_v3 | 52% | 35.36 | 0.013 |
+| **hnet_v4** (`mem_src tok`) | **99%** | 35.46 | 0.011 |
+| hnet_v4d (`--router_detach`) | 100% | 35.51 | 0.012 |
+| fixed_v4 | 96% | 35.70 | 0.011 |
+| heur_v4 | 78% | 35.54 | 0.012 |
+| iso_v4 | eval OOM (full attention + ALiBi bias over 36K frames) | | |
+
+- **Long gaps** (1.5k–24k frames, `hour_longgap`) stay at chance for every model, but there are only 13 queries.
+  `--freeze_fenc` long-gap fine-tuning (fixed_v5, hnet_v5) is the next test.
+- **`--router_detach`** (the ratio loss no longer shapes the encoder) did not make the L2 router learn: its AUC for
+  action events stays 0.50–0.55, while the L1 state change alone gives 0.86 and the L2 input 0.76.
+
+## Why the H-Net router learns on text but not on this video stream
+
+**Main-network ablation** (hnet_v4, held-out hour): removing main costs **0.03 dB** of next-frame PSNR (35.13 → 35.10)
+and raises action MSE from 0.0115 to 0.0148. Memory drops from 100% to 29%.
+
+So on this stream the dense loss is solved by the local stages. On text, next-byte loss *needs* the main network
+(words, syntax), so a boundary placed badly costs loss and the router gets a gradient. Here:
+
+- **no gradient signal:** where L2 cuts barely changes the dense loss;
+- **the L2 input is already a sequence of change points:** the router's "adjacent tokens are dissimilar → cut"
+  assumption, which works for bytes, has little left to find after L1;
+- **sparse credit:** only the rare query frames depend on long memory.
+
+This motivated v2 (`docs/v2-spatiotemporal.md`): a testbed where the dense loss does depend on long memory, and a
+front end that is sparse in space as well as time.

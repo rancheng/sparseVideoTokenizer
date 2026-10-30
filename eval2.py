@@ -11,7 +11,7 @@
 import argparse, json, math, os
 import numpy as np
 import torch
-from vt.env2 import simulate, Renderer, flat, G, CELL, BINS, CARRY, EV_EXIT, EV_REACH, RULE_C
+from vt.env2 import simulate, Renderer, flat, G, CELL, BINS, BELT_Y, CARRY, EV_EXIT, EV_REACH, RULE_C
 from vt.model2 import SparseVideoModel, to_cells
 from vt.stream2 import StreamingSparseModel
 from eval import frame_masks, near
@@ -66,6 +66,7 @@ def eval_stream(m, st, e, ablate=False):
         dirs = BINS - st["agent"][e, t]; dirs /= np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-6
         pick, gl = int(np.argmax(dirs @ (hd[t] if hd is not None else pol_np[t, :2]))), int(st["item_gly"][e, t])
         recs.append({"age": int(t - st["rule_t"][e, t]), "ok": int(pick == st["bin"][e, t]), "glyph_ok": int(pick in (gl, 3 - gl)),
+                     "side_ok": int(pick // 2 == st["bin"][e, t] // 2), "within_ok": int(pick % 2 == st["bin"][e, t] % 2),
                      "expert_ok": int(np.argmax(dirs @ st["action"][e, t, :2]) == st["bin"][e, t])})
     res["decisions"] = recs
     res["act_mse_moving"] = float(((pol_np[:, :2] - st["action"][e, :, :2]) ** 2)[np.abs(st["action"][e, :, :2]).sum(1) > 0.2].mean())
@@ -92,17 +93,31 @@ def eval_stream(m, st, e, ablate=False):
     cov = bn.copy(); cov[:-1] |= bn[1:]
     res["relevant_change_recall"] = float(cov[chg].mean()) if chg.any() else float("nan")
     res["event_precision_relevant"] = float((chg | np.roll(chg, -1, 0))[bn].mean())
-    # fovea: held glyph cell at decision frames (+-2), rule cell while the rule symbol is shown
+    # fovea: the item's cells at any frame from its tunnel exit to the decision (on the belt, then in the gripper),
+    # and the rule cell while the rule symbol is shown
+    def cell_of(x, y):
+        return int(min(G - 1, max(0, y // CELL))) * G + int(min(G - 1, max(0, x // CELL)))
+    exits = np.nonzero(ev & EV_EXIT)[0]
     hits = []
     for t in dec:
-        x, y = st["agent"][e, t]; j = int(min(G - 1, (y + 8) // CELL)) * G + int(min(G - 1, x // CELL))
-        hits.append(un[max(0, t - 3):t + 1, j].any())
+        t_ex = exits[exits <= t]
+        t0_ = t_ex[-1] if len(t_ex) else max(0, t - 30)
+        hit = False
+        for u in range(t0_, t + 1):
+            if st["belt_on"][e, u]:
+                js = {cell_of(st["belt_x"][e, u] + dx, BELT_Y) for dx in (-4, 4)}
+            else:
+                x, y = st["agent"][e, u]; js = {cell_of(x + dx, y + 8) for dx in (-4, 4)}
+            hit |= bool(un[u, list(js)].any())
+        hits.append(hit)
     rj = RULE_C[1] * G + RULE_C[0]
     on = np.nonzero(st["rule_on"][e])[0]
     starts = on[np.r_[True, np.diff(on) > 1]] if len(on) else []
     rule_hits = [un[s:s + 5, rj].any() for s in starts]
     res["fovea_hit_glyph"] = float(np.mean(hits)) if hits else float("nan")
     res["fovea_hit_rule"] = float(np.mean(rule_hits)) if len(rule_hits) else float("nan")
+    res["rule_event_on_flash"] = float(np.mean([bn[s:s + 2, rj].any() for s in starts])) if len(starts) else float("nan")
+    res["hires_share_tv"] = float(un[:, tvj].sum() / max(1, un.sum()))
     # ---- temporal levels ----
     masks = frame_masks(infos, N)
     prim = np.nonzero(np.diff(ph) != 0)[0] + 1
@@ -128,7 +143,12 @@ def eval_stream(m, st, e, ablate=False):
             pred = m.cdec(z[0, tt], cell[tt, jj], jj, oc).float()
         mse = ((pred - cn) ** 2).mean().item(); cp = ((cc - cn) ** 2).mean().item()
         res["exit_psnr"] = 10 * math.log10(1 / mse); res["exit_psnr_copy"] = 10 * math.log10(1 / max(cp, 1e-10))
-        res["_exit_sel"] = (tt, jj, cn, oc)
+        res["exit_psnr_copy_noisy"] = 10 * math.log10(1 / max(((oc - cn) ** 2).mean().item(), 1e-10))  # what the model sees
+        # the exit frame itself (k = 0): with --pop_exit only memory of the entry can predict it
+        k0 = torch.tensor([s[0] in set(exits.tolist()) for s in sel], device=dev)
+        res["exit0_psnr"] = 10 * math.log10(1 / ((pred - cn)[k0] ** 2).mean().item())
+        res["exit0_psnr_copy"] = 10 * math.log10(1 / max(((cc - cn)[k0] ** 2).mean().item(), 1e-10))
+        res["_exit_sel"] = (tt, jj, cn, oc, k0)
     # ---- compute (front end), from the event counts ----
     eng = StreamingSparseModel(m); c = eng.cost; J = G * G
     per = J * (c["cheap"] + c["router"]) + res["events_per_frame"] * (c["fovea"] + sum(c["block"]) + c["pool_row"]) + res["hires_per_frame"] * c["hires"] + c["pool"]
@@ -149,17 +169,17 @@ def exit_psnr_ablated(m, st, e, sel):
     main.forward = dead
     with torch.autocast("cuda", dtype=torch.bfloat16):
         h, _ = m.temporal(None, prev, x_lat=f); _, z = m.temporal.heads(h, act)
-        tt, jj, cn, oc = sel
+        tt, jj, cn, oc, k0 = sel
         pred = m.cdec(z[0, tt], cell[tt, jj], jj, oc).float()
     main.forward = orig
-    return 10 * math.log10(1 / ((pred - cn) ** 2).mean().item())
+    return 10 * math.log10(1 / ((pred - cn) ** 2).mean().item()), 10 * math.log10(1 / ((pred - cn)[k0] ** 2).mean().item())
 
 
 def summarize(rs, abl):
     out = {}
     for k in ["events_per_frame", "events_per_frame_idle", "events_per_frame_active", "hires_per_frame", "tv_event_rate",
-              "relevant_change_recall", "event_precision_relevant", "fovea_hit_glyph", "fovea_hit_rule", "exit_psnr",
-              "exit_psnr_copy", "exit_psnr_no_main", "act_mse_moving", "front_mflops_per_frame", "dense_front_mflops_per_frame"]:
+              "relevant_change_recall", "event_precision_relevant", "fovea_hit_glyph", "fovea_hit_rule", "rule_event_on_flash", "hires_share_tv", "exit_psnr", "exit0_psnr", "exit0_psnr_copy", "exit0_psnr_no_main",
+              "exit_psnr_copy", "exit_psnr_copy_noisy", "exit_psnr_no_main", "act_mse_moving", "front_mflops_per_frame", "dense_front_mflops_per_frame"]:
         v = [r[k] for r in rs if k in r and not (isinstance(r[k], float) and math.isnan(r[k]))]
         out[k] = float(np.mean(v)) if v else None
     out["levels"] = [{k: float(np.mean([r["levels"][l][k] for r in rs])) for k in rs[0]["levels"][l]} for l in range(len(rs[0]["levels"]))]
@@ -169,6 +189,8 @@ def summarize(rs, abl):
                                    "n": sum(lo <= x["age"] < hi for x in d)} for lo, hi in [(0, 600), (600, 1500), (1500, 3000), (3000, 10 ** 9)]}
         out[tag]["all"] = float(np.mean([x["ok"] for x in d])) if d else None
         out[tag]["glyph_read"] = float(np.mean([x["glyph_ok"] for x in d])) if d else None  # chance 0.5
+        out[tag]["side_ok"] = float(np.mean([x["side_ok"] for x in d])) if d else None      # pair mode: rule part
+        out[tag]["within_ok"] = float(np.mean([x["within_ok"] for x in d])) if d else None  # pair mode: glyph part
     return out
 
 
@@ -178,15 +200,18 @@ if __name__ == "__main__":
     ap.add_argument("--n_env", type=int, default=4)
     ap.add_argument("--delay", default="150,600")
     ap.add_argument("--tag", default="hour")
+    ap.add_argument("--pop_exit", action="store_true")
+    ap.add_argument("--rule_mode", default="mirror")
+    ap.add_argument("--N", type=int, default=36000, help="stream length (frames)")
     a = ap.parse_args()
-    st = simulate(a.n_env, 36000, seed=9999, delay=tuple(int(v) for v in a.delay.split(",")))
+    st = simulate(a.n_env, a.N, seed=9999, delay=tuple(int(v) for v in a.delay.split(",")), pop_exit=a.pop_exit, rule_mode=a.rule_mode)
     for name in a.names:
         m, ck = load(name)
         rs, abl = [], []
         for e in range(a.n_env):
             r = eval_stream(m, st, e)
             if "_exit_sel" in r:
-                r["exit_psnr_no_main"] = exit_psnr_ablated(m, st, e, r.pop("_exit_sel"))
+                r["exit_psnr_no_main"], r["exit0_psnr_no_main"] = exit_psnr_ablated(m, st, e, r.pop("_exit_sel"))
             rs.append(r); abl.append(eval_stream(m, st, e, ablate=True))
             torch.cuda.empty_cache()
         s = summarize(rs, abl)

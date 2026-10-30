@@ -74,8 +74,12 @@ class HiRes(nn.Module):
 
 class SparseFront(nn.Module):
     def __init__(self, d=128, dout=256, n_layers=2, router="tied", fovea="learned", N_cell=16, N_fov=4,
-                 heartbeat=64, K=4, k_max=12, k_fov=2):
+                 heartbeat=64, K=4, k_max=12, k_fov=2, fov_credit="ste", fov_pos=False, fov_explore=1.0):
         super().__init__()
+        # fov_credit "ste": the fovea score learns from every loss through a straight-through gate, and only on the cells
+        # it already picked. "task": the score regresses the first-order benefit of high resolution under the action
+        # losses alone, measured on every event cell (counterfactual gate; train2.py), with Gumbel top-k exploration
+        self.fov_credit, self.fov_pos, self.fov_explore = fov_credit, fov_pos, fov_explore
         self.force_fovea = False  # training warm-up only (see train2.py --fov_warm)
         self.k_fov = k_fov  # high-resolution cells per frame (learned fovea)
         self.k_max = k_max  # hard per-frame cap on routed events (heartbeats excluded): bounded compute and memory
@@ -114,6 +118,12 @@ class SparseFront(nn.Module):
         if self.router == "rel":
             logit = logit + self.rel(c.float()).squeeze(-1)
         return torch.sigmoid(logit)
+
+    def fov_logit(self, c, j=None):  # fovea score from the (detached) content embedding, plus the cell position
+        x = c.detach().float()
+        if self.fov_pos:
+            x = x + (self.pos if j is None else self.pos[j]).detach().float()
+        return self.fov(x).squeeze(-1)
 
     def heartbeat(self, t, J, device):  # t (T,) absolute frame times -> (T,J) staggered forced updates
         j = torch.arange(J, device=device)
@@ -174,19 +184,29 @@ class SparseFront(nn.Module):
             # learned fovea = top-k ranking (mixture-of-depths style): the k_fov event cells with the highest score get
             # the high-resolution encoder. The score's gradient is how much those features helped (straight-through,
             # value 1); nothing pushes all scores down, the gate only has to rank. Fixed compute per frame.
-            gs = torch.sigmoid(self.fov(c.detach().float()).squeeze(-1))
+            v = self.fov_logit(c)
+            gs = torch.sigmoid(v)
+            sv = v
+            if self.fov_credit == "task" and self.training and self.fov_explore > 0:  # Gumbel top-k = sampled ranking
+                sv = v - self.fov_explore * torch.log(-torch.log(torch.rand_like(v).clamp(1e-9, 1 - 1e-9)))
             if self.force_fovea:  # warm-up: every event cell, so the model learns to read fine detail first
                 gh = b
             else:
-                sc = torch.where(b, gs, torch.full_like(gs, -1.0))
+                sc = torch.where(b, sv, torch.full_like(sv, -float("inf")))
                 gh = b & (sc >= torch.topk(sc, self.k_fov, dim=-1).values[..., -1:])
-            g = 1 + gs - gs.detach()
+            if self.fov_credit == "task":
+                # counterfactual gate: in training every event cell is encoded at high resolution, the gate (value 0/1,
+                # a leaf) keeps only the picked ones in the forward pass, and d(task loss)/d(gate) on the others says
+                # what high resolution there would have bought. The forward pass equals inference exactly.
+                g = gh.float().requires_grad_(self.training and torch.is_grad_enabled())
+            else:
+                g = 1 + gs - gs.detach()
         elif self.fovea == "all":
             gs = torch.ones(B, T, J, device=frames.device); gh = gs > 0; g = gs
         else:
             gs = torch.zeros(B, T, J, device=frames.device); gh = gs > 0; g = gs
         use = b & gh                    # cells whose high-resolution encoding enters the model (= inference cost)
-        enc = use
+        enc = b if (self.fovea == "learned" and self.fov_credit == "task" and g.requires_grad) else use
         x0 = e
         if enc.any():
             hr = torch.zeros(B, T, J, self.d, device=frames.device, dtype=e.dtype)
@@ -227,6 +247,8 @@ class SparseFront(nn.Module):
         f = self.pool(cell.reshape(B * T, J, -1)).reshape(B, T, -1)
         new_state = {"c": c[:, -1].detach(), "low": low[:, -1].detach(), "zbar": zbar[:, -1].detach(), "x": x_last}
         info = {"b": b, "p": p, "gate": gh, "gate_soft": gs, "use": use, "hb": hb, "cell": cell}
+        if self.fovea == "learned":
+            info.update(fov_v=v, fov_gate=g)
         return f, info, new_state
 
 

@@ -8,9 +8,13 @@ What is in the scene, and which assumption it tests:
   * glyph-coded sorting        each item carries a glyph (solid / h-stripes / v-stripes / checker, all with the same
                                mean colour), so it is invisible at low resolution. The bin depends on the glyph, so the
                                policy needs high-resolution tokens at the right place (fovea, H4). Colour is a distractor.
-  * rule display               a small symbol flashed for 5 frames sets the glyph->bin mapping (identity or mirrored)
-                               until the next flash, minutes later. Every transport decision depends on it, so
-                               long-range credit is dense (H3), and the symbol also needs the fovea.
+  * rule display               a small symbol flashed for 5 frames sets the glyph->bin mapping until the next flash,
+                               minutes later. Every transport decision depends on it, so long-range credit is dense
+                               (H3), and the symbol also needs the fovea. rule_mode "mirror": identity or mirrored
+                               mapping (bin = glyph XOR rule: the rule alone says nothing about the bin, so a linear
+                               readout gets no first-order reward for remembering it). "pair": the rule picks the left
+                               or right pair of bins and the glyph picks within the pair (additive: each factor helps
+                               on its own).
   * noisy TV                   one grid cell (random position per env) shows unpredictable, irrelevant noise. A pure
                                change detector must fire on it every frame; a relevance-aware router can learn not to (H6).
   * static textured background, global light toggles, sensor noise, long idle stretches: spatial and temporal sparsity.
@@ -38,13 +42,18 @@ EV_GRASP, EV_RELEASE, EV_SPAWN, EV_EXIT, EV_RULE, EV_LIGHT, EV_REACH, EV_HOME = 
 ACTION_EVENTS = EV_GRASP | EV_RELEASE | EV_REACH | EV_HOME
 
 
-def target_bin(glyph, rule):
+def target_bin(glyph, rule, mode="mirror"):
+    if mode == "pair":
+        return 2 * rule + glyph % 2
     return np.where(rule == 0, glyph, 3 - glyph)
 
 
 def simulate(n_env, n_steps, seed=0, delay=(150, 600), rule_period=(600, 2400), light_rate=1 / 900, rule_fixed=None,
-             idle_mix=((0.6, 10, 60), (0.3, 60, 300), (0.1, 300, 1200))):
-    """Returns dict of per-frame arrays shaped (n_env, n_steps, ...). delay = tunnel transit time range in frames."""
+             idle_mix=((0.6, 10, 60), (0.3, 60, 300), (0.1, 300, 1200)), pop_exit=False, rule_mode="mirror"):
+    """Returns dict of per-frame arrays shaped (n_env, n_steps, ...). delay = tunnel transit time range in frames.
+    pop_exit: the item stays hidden until it is fully out of the tunnel and then appears in one frame, announced one
+    frame earlier by a lamp under the exit. The exit's timing is then visible locally, but its colour and glyph can only
+    come from memory of the entry (copying the last frame fails there by construction)."""
     rng = np.random.default_rng(seed)
     E = n_env
     pos = np.tile(HOME, (E, 1)).astype(np.float32)
@@ -69,7 +78,7 @@ def simulate(n_env, n_steps, seed=0, delay=(150, 600), rule_period=(600, 2400), 
         ("item_col", (), np.int64), ("item_gly", (), np.int64), ("held", (), bool), ("rule", (), np.int64),
         ("rule_on", (), bool), ("rule_t", (), np.int64), ("light", (), np.float32), ("tv_code", (), np.int64),
         ("action", (3,), np.float32), ("events", (), np.int64), ("phase", (), np.int64), ("episode", (), np.int64),
-        ("bin", (), np.int64), ("decision", (), bool)]}
+        ("bin", (), np.int64), ("decision", (), bool), ("lamp", (), bool)]}
     out["tv_cell"] = tv_cell
     out["env_id"] = np.broadcast_to(np.arange(E)[:, None], (E, n_steps)).copy()
     out["bin"][:] = -1
@@ -110,12 +119,14 @@ def simulate(n_env, n_steps, seed=0, delay=(150, 600), rule_period=(600, 2400), 
             ev |= np.where(go, EV_REACH, 0)
         out["agent"][:, t] = pos; out["grip"][:, t] = grip
         out["belt_on"][:, t] = belt_on; out["belt_x"][:, t] = belt_x
+        if pop_exit:
+            out["lamp"][:, t] = belt_on & (belt_x < TUN_X1 - 4) & (belt_x + belt_v >= TUN_X1 - 4)
         out["item_col"][:, t] = item_col; out["item_gly"][:, t] = item_gly; out["held"][:, t] = held
         out["rule"][:, t] = rule; out["rule_on"][:, t] = rule_show > 0; out["rule_t"][:, t] = rule_t
         out["light"][:, t] = light; out["tv_code"][:, t] = tv_code
         out["phase"][:, t] = mode; out["episode"][:, t] = episode
 
-        b = target_bin(item_gly, rule)
+        b = target_bin(item_gly, rule, rule_mode)
         target = np.tile(HOME, (E, 1))
         target = np.where((mode == REACH)[:, None], np.stack([np.full(E, PICK_X), np.full(E, BELT_Y + 6)], 1), target)
         target = np.where((mode == CARRY)[:, None], BINS[b] - np.array([0, 8.0]), target)
@@ -142,6 +153,8 @@ def simulate(n_env, n_steps, seed=0, delay=(150, 600), rule_period=(600, 2400), 
         # ---- dynamics ----
         pos = np.clip(pos + v * SPEED, 6, 122).astype(np.float32)
         nx = np.where(belt_on & (belt_x < PICK_X), np.minimum(belt_x + belt_v, PICK_X), belt_x)
+        if pop_exit:
+            nx = np.where(belt_on & (belt_x < TUN_X1 - 4) & (nx >= TUN_X1 - 4), TUN_X1 + 4, nx)
         ev |= np.where(belt_on & (belt_x < TUN_X1) & (nx >= TUN_X1), EV_EXIT, 0)
         belt_x = nx.astype(np.float32)
         rule_show = np.maximum(rule_show - 1, 0)
@@ -210,6 +223,10 @@ class Renderer:
         img = self.glyph_square(img, belt_x, torch.full_like(belt_x, BELT_Y), col, gly, 4.0, belt_on)
         tun = (self.xs >= TUN_X0) & (self.xs < TUN_X1) & ((self.ys - BELT_Y).abs() < 9)
         img = torch.where(tun[None, None], torch.tensor([0.42, 0.3, 0.2], device=self.dev)[None, :, None, None], img)
+        # exit lamp (pop_exit only): one frame before the item pops out of the tunnel
+        lamp = g("lamp")
+        lm = ((self.xs - TUN_X1).abs() < 3) & ((self.ys - (BELT_Y + 13)).abs() < 3)
+        img = torch.where((lm[None] & lamp[:, None, None])[:, None], torch.tensor([0.2, 0.95, 0.95], device=self.dev)[None, :, None, None], img)
         # robot + held item (below the gripper, glyph visible)
         img = self.glyph_square(img, agent[:, 0], agent[:, 1] + 8, col, gly, 4.0, held)
         d2 = (self.xs - agent[:, 0, None, None]) ** 2 + (self.ys - agent[:, 1, None, None]) ** 2

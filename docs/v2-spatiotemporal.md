@@ -65,3 +65,92 @@ Metrics come from `eval2.py`, on held-out hour-long streams in one causal pass:
 - exit-cell PSNR against copying the last frame;
 - every task metric again with the main network removed;
 - front-end FLOPs per frame against the dense patch model.
+
+## Results, round 1 (held-out 1-hour streams, 4 envs, one causal pass; `runs2/eval_hour_*.log`)
+
+Training: 7,000 steps, three stages (rule fixed / short rule period / normal), `--fov_warm 1000`.
+
+### Sparsity and the fovea (H4, H6)
+
+| run | events / frame (of 64) | high-res cells / frame | TV event rate | high-res share on TV | rule cell high-res per flash | glyph read before decision | front MFLOP / frame |
+|---|---|---|---|---|---|---|---|
+| st_learned (tied router, STE fovea) | 4.1 | 2.0 | 1.00 | 49% | 0% | 100% | 11.8 |
+| st_rel (+ relevance logit) | 4.3 | 2.1 | 1.00 | 47% | 1% | 99% | 14.1 |
+| **st_task** (counterfactual task-credit fovea) | 4.3 | 2.0 | 0.90 | **20%** | **35%** | 100% | 11.9 |
+| st_lowres (no fovea) | 3.7 | 0 | 1.00 | — | — | **53% (chance)** | 8.4 |
+| st_heur (pixel-change cells, all high-res) | 4.2 | 4.2 | 0.51 | 12% | 100% | 100% | 15.1 |
+| st_dense | 64 | 64 | 1.00 | 2% | 100% | 100% | 154 |
+
+- **H4 holds:** the glyph is only readable with the fovea (53% → 100%), and 2 high-res cells per frame suffice:
+  about 8% of the dense front's compute.
+- **The STE fovea falls for the noisy TV.** It learned only on cells it already picked, and from every loss, pixels
+  included. The TV does help next-frame pixels: it holds its value half the time. The rule cell, an event on every
+  flash, got high resolution 0% of the time.
+- **The fix, `--fov_credit task`.** In training only, every event cell is encoded at high resolution; a 0/1 gate (a
+  leaf) keeps only the picked ones in the forward pass, so training equals inference. The score regresses
+  −∂(action losses)/∂gate on *every* event cell (counterfactual, first order), with Gumbel top-k exploration and the
+  cell position as input. The TV's share fell from 49% to 20%, and the rule cell went from 0% to 35%.
+- **H6 not shown:** the learned relevance logit (`st_rel`) did not suppress the TV.
+
+### Rule memory (H3): a flaw in the testbed, not (only) the model
+
+Decision accuracy stayed at ≈ 0.5 for every model, the dense front and a 30× decision weight included. The scores
+were identical to three decimals across models: all of them apply one fixed glyph→bin mapping. Linear probes
+(66 flashes, grouped split) show where the rule is lost:
+
+| probe of the current rule | st_dense | st_heur | st_learned |
+|---|---|---|---|
+| rule cell state at the flash | 1.00 | 0.94 | 0.97 |
+| pooled frame vector at the flash | 0.81 | 0.92 | 0.51 |
+| temporal output h, 5 frames later | 0.53 | 0.47 | 0.44 |
+| h at the decision | 0.34 | 0.36 | 0.50 |
+
+Flashes do become tokens: L2 tokens land on 68% (heur) and 52% (learned) of flashes, against 27% for random cuts.
+The cause is the mirror rule: bin = glyph XOR rule. The heading head is linear in h, and the 8 (rule, glyph) → bin
+cases are not linearly separable from additive rule and glyph features. Remembering the rule pays nothing at first
+order until the network builds the interaction, so the toy tested XOR learning, not memory. The v1/v4 cue mapped
+straight to the answer, and memory learned there.
+
+**Fix:** `rule_mode=pair`. The rule picks the left or right pair of bins and the glyph picks within the pair, so each
+helps on its own. Runs: `st_pair_heur`, `st_pair_task`.
+
+### Object permanence (H1)
+
+- **The exit test was broken.** Items crawled out of the tunnel at 0.13–0.5 px/frame, so next-frame prediction at
+  exits was solved by copying: the model scored 28.6 dB, noisy copy 28.7 dB.
+- **`--pop_exit`.** The item now appears in one frame, announced by a lamp one frame earlier, so the timing is
+  local. `exit0_psnr` scores only that frame: copy 20.7 dB.
+
+`st_pop` (pop exits, 256 exit cells sampled per step) results:
+- **Exit frame:** 21.9 dB against copy 20.7, and **21.9 with the main network removed**. The gain is a generic
+  "an item appears" prediction, not memory.
+- **Colour probes (4-way, chance 0.25):** frame vector at the entry 0.63; h at the entry 0.30; h at the lamp 0.25.
+- **Why the dense loss still doesn't pay for memory:** the cell decoder gets each cell's own state directly, so h
+  only has to carry what that state lacks. That is needed on a handful of exit frames. It is the v1 situation again,
+  one level down.
+- **The temporal hierarchy did become event-driven:**
+  - L1: 43 tokens/min idle vs 227/min active (`st_task`: 137 vs 200).
+  - L2: catches 98% of task starts, against 28% for random cuts at the same rate.
+
+### Rule memory with the additive rule (`rule_mode=pair`)
+
+The rule is now learnable. Training decision accuracy (flash inside the clip) climbs past the fixed-rule stage:
+`st_pair_heur` from 0.42 to about 0.8, `st_pair_task` from 0.23 to about 0.7–0.9. Accuracy on the glyph half of the
+decision is 1.00 and 0.94.
+
+It is only remembered while the flash is recent. Rule half (`side_ok`), 48 held-out 2,048-frame streams:
+
+| flash age (frames) | 0–600 | 600–1500 | 1500–3000 |
+|---|---|---|---|
+| st_pair_heur | 0.68 | 0.50 | 0.22 |
+| st_pair_heur, main removed | 0.66 | 0.33 | 0.11 |
+| st_pair_task | 0.62 | 0.42 | 0.00 |
+
+The hour streams give 0.55 overall. Removing the main network barely changes the short-age accuracy, so the rule is
+carried by the local stages' windowed attention (the L2 window spans about 1,000 frames). Once the flash leaves that
+window, the decision falls back to a prior. The main network and the memory are not used for it.
+
+Every v2 test now shows the same thing: the local stages solve what they can see, and no loss trains the main
+network to reach beyond them. Next test: `--w_main`, which gives the main network a loss at its own rate (predict the
+next event token, as next-byte loss at an H-Net boundary does on text). Runs `st_pp` vs `st_pp_main` (pair rule, pop
+exits, task-credit fovea).

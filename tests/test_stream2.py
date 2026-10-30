@@ -14,9 +14,10 @@ frames, _ = Renderer()(flat(st, 0, 0, T))
 act = torch.as_tensor(st["action"][0], device="cuda")
 prev = torch.cat([torch.zeros_like(act[:1]), act[:-1]])
 ok = True
-for router, fovea in [("tied", "learned"), ("rel", "learned"), ("heur", "all"), ("dense", "none")]:
+for router, fovea, extra in [("tied", "learned", {}), ("tied", "learned", dict(fov_credit="task", fov_pos=True)),
+                             ("rel", "learned", {}), ("heur", "all", {}), ("dense", "none", {})]:
     torch.manual_seed(0)  # each config self-contained
-    m = SparseVideoModel(dict(router=router, fovea=fovea), dict(router="tied", alibi=True, mem_read=True, mem_src="tok")).cuda().eval()
+    m = SparseVideoModel(dict(router=router, fovea=fovea, **extra), dict(router="tied", alibi=True, mem_read=True, mem_src="tok")).cuda().eval()
     with torch.no_grad():
         fr = m.front
         fr.beta.fill_(0.002); fr.log_tau.fill_(-7.0)                     # sparse-ish random router

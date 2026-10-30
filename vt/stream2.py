@@ -76,7 +76,7 @@ class StreamingSparseModel:
         if n:
             e = c[ev] + fr.pos[ev]
             if fr.fovea == "learned":
-                gs = torch.sigmoid(fr.fov(c[ev].float()).squeeze(-1))
+                gs = fr.fov_logit(c[ev], ev)
                 use = gs >= torch.topk(gs, min(fr.k_fov, n)).values[-1]
                 self.flops["fovea+hires"] += n * self.cost["fovea"]
             else:
