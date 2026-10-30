@@ -7,3 +7,6 @@ runs/_v0/
 *.log
 !runs/**/stdout.log
 viz/.cache/
+runs2/**/ckpt.pt
+runs2/**/*.npz
+!runs2/**/stdout.log

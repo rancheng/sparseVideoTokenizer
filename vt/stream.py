@@ -14,7 +14,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torch.utils.flop_counter import FlopCounterMode
-from vt.model import Stage, MainNet, rope, dt_bucket
+from vt.model import Stage, MainNet, rope, dt_bucket, time_slopes
 
 
 class WindowCache:
@@ -57,18 +57,26 @@ def lin_flops(mod):
 
 
 class StackRunner:
-    def __init__(self, stack, full):
-        self.stack, self.full = stack, full
+    def __init__(self, stack, full, alibi=False):
+        self.stack, self.full, self.alibi = stack, full, alibi
         self.caches = [FullCache() if full else WindowCache() for _ in stack.blocks]
         self.block_flops = [lin_flops(b) for b in stack.blocks]
+        self.tk = []  # key times (frames) for the time-recency bias
+        if alibi:
+            self.slopes = time_slopes(stack.blocks[0].attn.h, next(stack.parameters()).device)
 
-    def step(self, x, flops):  # x (1,D)
+    def step(self, x, flops, t=None):  # x (1,D)
+        bias = None
+        if self.alibi:
+            self.tk.append(t)
+            dt = (t - torch.tensor(self.tk, device=x.device, dtype=torch.float32)).clamp(min=0)
+            bias = (-self.slopes[:, None, None] * dt[None, None])[None].to(x.dtype)  # (1,H,1,n)
         for blk, cache, bf in zip(self.stack.blocks, self.caches, self.block_flops):
             a = blk.attn
             q, k, v = a.qkv(blk.n1(x)).view(3, a.h, 1, a.dh).unbind(0)
             if self.full:
                 K, V = cache.push(k, v)
-                out = F.scaled_dot_product_attention(q[None], K[None], V[None])
+                out = F.scaled_dot_product_attention(q[None], K[None], V[None], attn_mask=bias)
             else:
                 K, V = cache.push(k, v, a.window)
                 n = K.shape[1]; pos = torch.arange(n, device=x.device)
@@ -101,12 +109,15 @@ class StreamingVideoHNet:
         net = model.body
         while isinstance(net, Stage):
             self.levels.append(LevelState(net)); net = net.inner
-        self.main = StackRunner(net.stack, True)
+        self.main = StackRunner(net.stack, True, alibi=getattr(net, "alibi", False))
+        self.read_k = self.read_v = None; self.read_t = []  # per-frame memory read cache (one entry per event)
         self.t = 0; self.prev_frame = None
         dev = next(model.parameters()).device
         with FlopCounterMode(display=False) as fc:  # constant per-frame cost of frame encoder + heads
             with torch.no_grad():
-                model.fenc(torch.zeros(1, 3, 64, 64, device=dev)); z = torch.zeros(1, model.act_in.out_features, device=dev)
+                if hasattr(model, "fenc"):  # absent when a sparse front end supplies the latents (vt/stream2.py)
+                    model.fenc(torch.zeros(1, 3, 64, 64, device=dev))
+                z = torch.zeros(1, model.act_in.out_features, device=dev)
                 model.heads(z, torch.zeros(1, 3, device=dev))
         self.frame_flops = fc.get_total_flops() + lin_flops(model.act_in)
         self.flops = {"frame_enc+heads": 0, "level1": 0, "level2": 0, "main": 0}
@@ -121,7 +132,11 @@ class StreamingVideoHNet:
                 p = torch.ones((), device=x.device)
             else:
                 q = F.normalize(S.wq(h.float()), dim=-1); k = F.normalize(S.wk(L.prev_h.float()), dim=-1)
-                p = (0.5 * (1 - (q * k).sum())).clamp(0, 1)
+                dist = 1 - (q * k).sum()
+                if getattr(S, "router", "cos") == "tied":
+                    p = torch.sigmoid((dist - S.beta) / S.log_tau.exp().clamp(min=1e-5))
+                else:
+                    p = (0.5 * dist).clamp(0, 1)
             b = bool(p >= 0.5)
         else:
             if S.chunker == "fixed":
@@ -144,7 +159,13 @@ class StreamingVideoHNet:
             if l + 1 < len(self.levels):
                 zo = self._level_step(l + 1, zi, t, score)
             else:
-                mf = [0]; zo = self.main.step(zi, mf); self.flops["main"] += mf[0]
+                mf = [0]; zo = self.main.step(zi, mf, t); self.flops["main"] += mf[0]
+                if self.m.mem_read:  # write one memory entry per top-level event
+                    r = self.m.read
+                    kk, vv = r.kv(r.entry(zo, zi)).view(2, r.h, 1, r.dh).unbind(0)
+                    self.read_k = kk if self.read_k is None else torch.cat([self.read_k, kk], 1)
+                    self.read_v = vv if self.read_v is None else torch.cat([self.read_v, vv], 1)
+                    self.read_t.append(t); self.flops["main"] += lin_flops(r.kv)
             zo = S.down(zo)
             p = p.to(zo.dtype)
             L.zbar = p * zo if L.zbar is None else p * zo + (1 - p) * L.zbar
@@ -160,11 +181,24 @@ class StreamingVideoHNet:
         m = self.m
         score = 1e9 if self.prev_frame is None else (frame - self.prev_frame).abs().mean().item() if self.th else 0.0
         self.prev_frame = frame
-        x = m.fenc(frame[None])
+        return self.step_latent(m.fenc(frame[None]), prev_action, action, score)
+
+    @torch.no_grad()
+    def step_latent(self, x, prev_action, action=None, score=0.0):
+        """x (1,D) frame latent from any front end."""
+        m = self.m
         if m.use_actions:
             x = x + m.act_in(prev_action[None]).to(x.dtype)
         h = self._level_step(0, x, self.t, score)
-        pol, z = m.heads(h, (action if action is not None else torch.zeros(3, device=frame.device))[None])
+        if m.mem_read:  # every frame reads all events so far (time-causal, recency-biased)
+            r = m.read
+            q = r.q(r.n(h)).view(1, r.h, 1, r.dh)
+            dt = (self.t - torch.tensor(self.read_t, device=h.device, dtype=torch.float32)).clamp(min=0)
+            bias = (-time_slopes(r.h, h.device)[:, None, None] * dt[None, None])[None].to(q.dtype)
+            out = F.scaled_dot_product_attention(q, self.read_k[None], self.read_v[None], attn_mask=bias)
+            h = h + r.o(out.reshape(1, -1))
+            self.flops["frame_enc+heads"] += lin_flops(r.q) + lin_flops(r.o) + 4 * self.read_k.shape[1] * r.h * r.dh
+        pol, z = m.heads(h, (action if action is not None else torch.zeros(3, device=x.device))[None])
         self.flops["frame_enc+heads"] += self.frame_flops
         self.t += 1
         return pol[0], z[0], h[0]

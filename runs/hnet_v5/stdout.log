@@ -1,0 +1,28 @@
+/home/ubuntu/Codes/videoTokenizer/train.py:130: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  return loss, dict(loss=loss.item(), mse=mse.item(), a_mse=a_mse.item(), g_bce=g_bce.item(), ratio=float(ratio), comp=comp,
+params 41.3M {'chunkers': ['learned', 'learned'], 'Ns': [4, 4], 'dims': [256, 384, 512], 'n_main': 8, 'use_actions': True, 'heartbeats': [64, 256], 'ratio_mode': 'target', 'rate_w': 0.0, 'router': 'tied', 'alibi': True, 'mem_read': True, 'mem_src': 'tok', 'router_detach': False}
+{"loss": 0.08289, "mse": 0.00051, "a_mse": 0.00612, "g_bce": 0.00285, "ratio": 2.37791, "comp": [4.863163948059082, 8.06100845336914], "mem_acc": 0.0, "step": 0, "time": 0.71698, "gn": 0.27788, "mem_gb": 14.66959}
+{"loss": 0.07507, "mse": 0.0005, "a_mse": 0.00436, "g_bce": 0.00282, "ratio": 2.18097, "comp": [3.8555123805999756, 10.023860931396484], "mem_acc": 1.0, "step": 50, "time": 16.05602, "gn": 0.10508, "mem_gb": 15.6352}
+{"loss": 0.06298, "mse": 0.00053, "a_mse": 0.00455, "g_bce": 0.00363, "ratio": 1.76033, "comp": [4.240165710449219, 64.25098419189453], "mem_acc": 1.0, "step": 100, "time": 31.50742, "gn": 0.13991, "mem_gb": 18.0398}
+{"loss": 0.09002, "mse": 0.00053, "a_mse": 0.00476, "g_bce": 0.00275, "ratio": 2.65713, "comp": [4.19188928604126, 5.596584320068359], "mem_acc": 1.0, "step": 150, "time": 47.043, "gn": 0.37719, "mem_gb": 19.68581}
+{"loss": 0.06562, "mse": 0.00047, "a_mse": 0.00382, "g_bce": 0.00301, "ratio": 1.89158, "comp": [4.2878828048706055, 23.796659469604492], "mem_acc": 1.0, "step": 200, "time": 62.46786, "gn": 0.05492, "mem_gb": 19.68581}
+{"loss": 0.09121, "mse": 0.00051, "a_mse": 0.00385, "g_bce": 0.00276, "ratio": 2.73307, "comp": [4.225947856903076, 5.136050224304199], "mem_acc": 1.0, "step": 250, "time": 78.07958, "gn": 0.43227, "mem_gb": 21.76275}
+{"loss": 0.06714, "mse": 0.00047, "a_mse": 0.00416, "g_bce": 0.00283, "ratio": 1.93323, "comp": [4.008317947387695, 20.15252113342285], "mem_acc": 1.0, "step": 300, "time": 95.15612, "gn": 0.04131, "mem_gb": 21.76275}
+{"loss": 0.09597, "mse": 0.00048, "a_mse": 0.00403, "g_bce": 0.00298, "ratio": 2.89556, "comp": [4.7087225914001465, 5.081885814666748], "mem_acc": 1.0, "step": 350, "time": 112.27344, "gn": 0.49931, "mem_gb": 23.34258}
+{"loss": 0.06166, "mse": 0.00051, "a_mse": 0.0046, "g_bce": 0.00264, "ratio": 1.72353, "comp": [4.438304424285889, 76.20465087890625], "mem_acc": 1.0, "step": 400, "time": 127.77744, "gn": 0.13592, "mem_gb": 23.34258}
+{"loss": 0.06152, "mse": 0.00051, "a_mse": 0.00432, "g_bce": 0.0029, "ratio": 1.72855, "comp": [4.250616073608398, 67.8426513671875], "mem_acc": 1.0, "step": 450, "time": 143.30399, "gn": 0.13144, "mem_gb": 23.34258}
+{"loss": 0.06346, "mse": 0.00054, "a_mse": 0.00526, "g_bce": 0.00355, "ratio": 1.74857, "comp": [4.009298801422119, 72.65631866455078], "mem_acc": 1.0, "step": 500, "time": 158.96859, "gn": 0.13584, "mem_gb": 23.34258}
+{"loss": 0.06089, "mse": 0.00046, "a_mse": 0.00406, "g_bce": 0.00251, "ratio": 1.73112, "comp": [3.913531541824341, 102.08099365234375], "mem_acc": 1.0, "step": 550, "time": 174.60828, "gn": 0.1484, "mem_gb": 23.34258}
+{"loss": 0.0626, "mse": 0.00051, "a_mse": 0.00423, "g_bce": 0.00294, "ratio": 1.76492, "comp": [4.343008518218994, 46.87839889526367], "mem_acc": 1.0, "step": 600, "time": 190.29346, "gn": 0.1071, "mem_gb": 23.34258}
+{"loss": 0.06331, "mse": 0.00052, "a_mse": 0.00481, "g_bce": 0.00309, "ratio": 1.76716, "comp": [3.7114055156707764, 99.29696655273438], "mem_acc": 1.0, "step": 650, "time": 205.95083, "gn": 0.14509, "mem_gb": 23.34258}
+{"loss": 0.06065, "mse": 0.0005, "a_mse": 0.00393, "g_bce": 0.00202, "ratio": 1.71582, "comp": [4.401934623718262, 101.44891357421875], "mem_acc": 1.0, "step": 700, "time": 221.63477, "gn": 0.13696, "mem_gb": 23.34258}
+{"loss": 0.06114, "mse": 0.00049, "a_mse": 0.00475, "g_bce": 0.00276, "ratio": 1.70543, "comp": [4.8124542236328125, 60.34622573852539], "mem_acc": 1.0, "step": 750, "time": 237.25329, "gn": 0.10924, "mem_gb": 23.34258}
+Traceback (most recent call last):
+  File "/home/ubuntu/Codes/videoTokenizer/train.py", line 143, in <module>
+    loss, m = step_loss(model, frames, act, ext, ev)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/Codes/videoTokenizer/train.py", line 117, in step_loss
+    mse = F.mse_loss(pred.float(), nxt.reshape(-1, *nxt.shape[2:])[sel])
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.50 GiB. GPU 0 has a total capacity of 23.51 GiB of which 1.14 GiB is free. Process 986217 has 424.64 MiB memory in use. Including non-PyTorch memory, this process has 21.43 GiB memory in use. Of the allocated memory 20.80 GiB is allocated by PyTorch, and 160.61 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)

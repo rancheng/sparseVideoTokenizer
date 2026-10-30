@@ -219,4 +219,8 @@ class ClipSampler:
         clean = clean.view(B, T + 1, 3, H, W)
         act = torch.as_tensor(sub["action"], device=self.dev).view(B, T + 1, 3)
         ev = torch.as_tensor(sub["events"], device=self.dev).view(B, T + 1)
+        # query frames whose cue lies inside the clip (answerable from context); others are label noise
+        qct = torch.as_tensor(sub["query_cue_t"], device=self.dev).view(B, T + 1)
+        self.last_qok = (qct >= torch.as_tensor(t0s, device=self.dev)[:, None]) & (qct >= 0)
+        self.last_qbad = (qct >= 0) & ~self.last_qok
         return frames, clean, act, ev
