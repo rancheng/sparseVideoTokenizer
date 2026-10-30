@@ -57,12 +57,26 @@ bars are projections from them. Dense needs 127 GB of KV for a day; event-driven
 
 ![scale projection](docs/figures/scale_projection.png)
 
-**What doesn't work yet:**
+**v1 problems, since fixed** (details in the experiment log):
 
-- **The learned router barely discriminates.** Its `p_t` is pinned at about 0.5 (see the timeline below),
-  so boundaries are close to coin flips. The pixel-change heuristic is idle-adaptive, but it chases lighting changes.
-- **Prediction quality is flat from 1× to 255× compression,** and memory recall is at chance for every
-  model, dense included. Nothing in the objective rewards remembering yet.
+- **Router stuck at p ≈ 0.5.** Fixed by tying W_q and W_k at init and calibrating the threshold.
+- **Memory at chance.** Fixed by storing each event token next to the main output (`--mem_src tok`): held-out hour
+  memory went from 52% (v3) to 99% (hnet_v4), against fixed chunking 96% and the pixel-change heuristic 78%.
+
+**Why H-Net's router gets little signal here.** Removing the main network costs only 0.03 dB of next-frame PSNR,
+because the local stages solve the dense loss.
+
+**v2: sparse spatio-temporal tokenizer with a fovea** ([docs/v2-spatiotemporal.md](docs/v2-spatiotemporal.md)).
+Cells are routed per frame and a learned fovea picks the few cells that get high resolution. It runs on a testbed
+built to test each assumption: a tunnel (object permanence), glyphs visible only at high resolution, a rule symbol
+flashed minutes before it matters, and a noisy TV.
+
+- **Holds:** about 4 of 64 cells per frame are processed, at 12 vs 150 MFLOP per frame for a dense front end.
+- **Holds:** without the fovea the glyph is unreadable (chance).
+- **Holds:** a counterfactual task-credit fovea moves high resolution off the noisy TV (49% → 20%) and onto the rule
+  symbol (0% → 60%).
+- **Not yet:** the main network does not carry content past the local windows. The rule is remembered for about
+  600 frames; tunnel exits and hour-long streams are not.
 
 ![timeline](docs/figures/timeline.png)
 
@@ -83,10 +97,10 @@ bars are projections from them. Dense needs 127 GB of KV for a day; event-driven
 
 ## What's next
 
-Fix the router so it is sensitive at init: tied or temperature-scaled cosine, or difference routing. Then
-make long-range memory pay through the objective: action chunking, and a self-supervised retrieval loss.
-After that comes a sparse frame encoder that recomputes only the patches that changed, and an L3 stage for
-day-long context. Details: **[docs/future-plans.md](docs/future-plans.md)**.
+Make the main network matter for the dense loss without wrecking task features: a next-event-token loss on main
+alone (`--main_detach`), training on streams long enough to hold several flashes, and an exit-content objective.
+Then a learned relevance term for the cell router, and the day-scale L3 stage. Details:
+**[docs/future-plans.md](docs/future-plans.md)** and **[docs/v2-spatiotemporal.md](docs/v2-spatiotemporal.md)**.
 
 ## Layout
 

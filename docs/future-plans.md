@@ -3,7 +3,28 @@
 The plans are ordered by what currently blocks the goal: a policy that *uses* an hour (later a day)
 of video context on a single RTX 4090, with compute that scales with events rather than with frames.
 
-## 0. What we learned so far (drives the order below)
+## Status update (v4 and v2)
+
+Items 1 and 2 below are partly done:
+- **The router.** Tied init and threshold calibration fixed the stuck-at-0.5 router.
+- **Memory.** Event-token memory (`--mem_src tok`) made memory learn: 99% on the held-out hour.
+- **Item 3.** The sparse spatio-temporal front end with a fovea (v2) is built: 12 vs 150 MFLOP per frame.
+
+The blocker is now one problem, seen in every v2 test: **the main network carries nothing the local stages can't**.
+- The dense losses are solved within the local windows.
+- A next-token loss on main at full weight overwrote task features.
+
+Next, in order:
+1. **A main-only next-event-token loss** (`--main_detach`), or a low weight.
+2. **Training clips that hold several rule flashes,** so retrieving the right one is learned. The hour-long eval
+   holds about 30 flashes, while training clips hold one or two.
+3. **An exit-content objective** whose input cannot see the content. The cell decoder gets each cell's own state,
+   so the temporal latent need not carry content.
+4. **A relevance term for the cell router.** The learned logit did not suppress the noisy TV.
+
+See [v2-spatiotemporal.md](v2-spatiotemporal.md), "What holds so far".
+
+## 0. What we learned so far (v1; drives the order below)
 
 1. **Sparse streaming works.** The main network runs at the event rate, its KV cache grows with events,
    and the engine matches training exactly. The per-frame **frame encoder is now the cost floor**.

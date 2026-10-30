@@ -33,6 +33,7 @@ p.add_argument("--n_dec", type=int, default=2048, help="cells decoded per step (
 p.add_argument("--pop_exit", action="store_true", help="env: items pop out of the tunnel in one frame (memory-only exit)")
 p.add_argument("--rule_mode", default="mirror", choices=["mirror", "pair"], help="env: glyph x rule -> bin mapping")
 p.add_argument("--w_main", type=float, default=0.0, help="weight of the main network's next-event-token loss (0 = off)")
+p.add_argument("--main_detach", action="store_true", help="main loss trains the main network only (detached tokens)")
 p.add_argument("--n_exit", type=int, default=0, help="extra decoded cells per step at tunnel-exit frames (exit cells)")
 p.add_argument("--delay", default="150,600", help="tunnel transit time range (frames)")
 p.add_argument("--n_env", type=int, default=64)
@@ -54,7 +55,7 @@ chunkers = args.chunkers.split(","); Ns = [int(n) for n in args.Ns.split(",")]
 front = dict(router=args.router, fovea=args.fovea, N_cell=args.N_cell, k_fov=args.k_fov, k_max=args.k_max,
              fov_credit=args.fov_credit, fov_pos=args.fov_pos, fov_explore=args.fov_explore)
 temporal = dict(chunkers=chunkers, Ns=Ns, dims=[256, 384, 512][: len(chunkers) + 1] if chunkers != ["all"] else [256, 512],
-                router="tied", alibi=True, mem_read=True, mem_src="tok", main_pred=args.w_main > 0)
+                router="tied", alibi=True, mem_read=True, mem_src="tok", main_pred=args.w_main > 0, main_pred_detach=args.main_detach)
 cfg = dict(front=front, temporal=temporal)
 model = SparseVideoModel(front, temporal).cuda()
 if args.init:

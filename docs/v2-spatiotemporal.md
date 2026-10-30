@@ -154,3 +154,42 @@ Every v2 test now shows the same thing: the local stages solve what they can see
 network to reach beyond them. Next test: `--w_main`, which gives the main network a loss at its own rate (predict the
 next event token, as next-byte loss at an H-Net boundary does on text). Runs `st_pp` vs `st_pp_main` (pair rule, pop
 exits, task-credit fovea).
+
+### Main network: does its own loss make memory pay? (`st_pp` vs `st_pp_main`)
+
+Both runs use the pair rule, pop exits (256 exit cells per step) and the task-credit fovea. `st_pp_main` adds
+`--w_main 1`: the main network predicts the next event token (cosine, stop-gradient target).
+
+| | st_pp | st_pp_main |
+|---|---|---|
+| rule cell high-res per flash (hour) | **60%** | 5% |
+| TV high-res share | 21% | 14% |
+| rule half, 2k streams, age 0–600 (main removed) | **0.71 (0.48)** | 0.26 (0.24) |
+| rule half, 2k streams, all ages | 0.64 | 0.46 |
+| glyph half, 2k streams | 0.99 | 0.47 |
+| rule half, hour streams | 0.54 | 0.45 |
+| exit frame PSNR / copy / main removed | 21.8 / 20.7 / 21.8 | 21.8 / 20.7 / 21.8 |
+| item colour probe in h at the lamp (chance 0.25) | 0.22 | 0.24 |
+| L1 tokens/min idle vs active | 34 vs 323 | 10 vs 137 |
+| L2 task-start recall (random at same rate) | 0.59 (0.28) | 0.16 (0.33) |
+
+- **`st_pp` is the first run where the main network matters for a decision.** Removing it drops rule decisions on
+  recent flashes from 0.71 to 0.48. When the rule matters additively, the fovea also finds the rule cell on 60% of
+  flashes.
+- **Memory still does not reach the exit or old flashes.** The exit frame is predicted no better with main than
+  without, and the item's colour is not in h. Hour-long streams stay at chance: training clips hold at most 2,048
+  frames and one or two flashes, while an hour holds about 30 flashes, all in the memory.
+- **`--w_main 1` hurt.** The next-token loss flowed back into the token encoders and overrode task features: the
+  glyph half fell from 0.99 to 0.47, and the policy did not recover in training. Queued:
+  - `--main_detach`: the loss trains only the main network, on a second pass over detached tokens;
+  - `--w_main 0.1`.
+
+### What holds so far
+
+| assumption | status | evidence |
+|---|---|---|
+| per-cell event routing is sparse and recalls relevant change | **holds** | 4 of 64 cells per frame, 0.92–0.99 recall of relevant cell changes, 12 vs 150 MFLOP per frame |
+| a learned fovea finds the few cells that need high resolution (H4) | **holds, with task credit** | glyph unreadable without it (0.53); counterfactual task credit moves high-res off the TV (49% → 20%) and onto the rule (0% → 60%) |
+| a relevance logit lets the cell router ignore the noisy TV (H6) | not shown | `st_rel` TV event rate 1.00 |
+| temporal chunking is event-driven; L2 matches tasks (H2) | **partly** | L1 34 tokens/min idle vs 323 active; L2 task recall 0.59–1.00 against random 0.28–0.51, but not in every run |
+| the main network and memory carry long-range content (H1, H3) | **not yet** | short-range rule only (≤ 600 frames); exits and colour not remembered; hour streams at chance |

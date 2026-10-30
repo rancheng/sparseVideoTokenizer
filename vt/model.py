@@ -149,7 +149,7 @@ def time_bias(tq, tk, slopes, kvalid=None, causal_idx=None):
 
 
 class MainNet(nn.Module):
-    def __init__(self, d, n, alibi=False, pred=False):
+    def __init__(self, d, n, alibi=False, pred=False, pred_detach=False):
         super().__init__()
         self.stack = Stack(d, n, window=None)
         self.alibi = alibi
@@ -159,9 +159,11 @@ class MainNet(nn.Module):
         # the local stages; this one needs whatever happened events ago (an item's colour when it leaves the tunnel).
         if pred:
             self.nxt = nn.Sequential(RMSNorm(d), nn.Linear(d, d))
+        self.pred_detach = pred_detach  # the loss trains main (and its head) only, on a second pass over detached tokens
         self.pred_loss = None
 
     def forward(self, x, meta):
+        self.pred_loss = None  # per call: never reuse the previous step's graph
         bias_fn = None
         if self.alibi:
             t, slopes, cache = meta["time"], time_slopes(self.stack.blocks[0].attn.h, x.device), {}
@@ -174,7 +176,8 @@ class MainNet(nn.Module):
         self.last = (out, meta["time"], meta["valid"], x)  # read by VideoHNet.mem_read (memory read at frame rate)
         if hasattr(self, "nxt") and self.training and x.shape[1] > 1:
             v = meta["valid"][:, 1:] & meta["valid"][:, :-1]
-            cos = F.cosine_similarity(self.nxt(out[:, :-1]).float(), x[:, 1:].detach().float(), dim=-1)
+            src = self.stack(x.detach(), bias_fn) if self.pred_detach else out
+            cos = F.cosine_similarity(self.nxt(src[:, :-1]).float(), x[:, 1:].detach().float(), dim=-1)
             self.pred_loss = ((1 - cos) * v).sum() / v.sum().clamp(min=1)
         return out, []
 
@@ -348,7 +351,7 @@ class VideoHNet(nn.Module):
     def __init__(self, chunkers=("learned", "learned"), Ns=(4, 4), dims=(256, 384, 512), n_outer=2, n_main=8,
                  window=64, use_actions=True, heartbeats=(64, 256), ratio_mode="target", rate_w=0.0,
                  router="cos", alibi=False, mem_read=False, mem_src="out", router_detach=False, frame_io=True,
-                 main_pred=False):
+                 main_pred=False, main_pred_detach=False):
         super().__init__()
         self.use_actions, self.mem_read = use_actions, mem_read
         d0 = dims[0]
@@ -357,7 +360,7 @@ class VideoHNet(nn.Module):
             self.fdec = FrameDecoder(d0)
         self.act_in = nn.Linear(3, d0)
         self.act_fwd = nn.Linear(3, d0)
-        net = MainNet(dims[len(chunkers)], n_main, alibi, main_pred)
+        net = MainNet(dims[len(chunkers)], n_main, alibi, main_pred, main_pred_detach)
         self.main = net
         for lvl in reversed(range(len(chunkers))):
             net = Stage(dims[lvl], dims[lvl + 1], n_outer, n_outer, window, chunkers[lvl], Ns[lvl], net, lvl,
