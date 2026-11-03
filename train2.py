@@ -46,6 +46,9 @@ p.add_argument("--fov_warm", type=int, default=0, help="steps with full resoluti
 p.add_argument("--focus_curr", type=float, default=None, help="decision focus during the fixed-rule stage")
 p.add_argument("--stages", default="", help="curriculum 'step:T:B:focus:rule,...', rule in fixed/short/normal; "
                "overrides T, B, focus and rule_curr (e.g. glyph on short decision clips, then rule memory on longer clips)")
+p.add_argument("--freeze_front", action="store_true", help="frozen sparse front, run in chunks without activations: "
+               "the temporal model trains on long clips (rule flashes and exits far apart inside one clip)")
+p.add_argument("--chunk", type=int, default=2048, help="frozen front: frames rendered and encoded per piece")
 p.add_argument("--rule_curr", type=int, default=0, help="first N steps with a fixed rule (glyph only), then rule flashes")
 args = p.parse_args()
 
@@ -60,6 +63,8 @@ cfg = dict(front=front, temporal=temporal)
 model = SparseVideoModel(front, temporal).cuda()
 if args.init:
     model.load_state_dict(torch.load(args.init)["model"])
+if args.freeze_front:
+    model.front.requires_grad_(False); model.front.eval()
 print(f"params {sum(q.numel() for q in model.parameters())/1e6:.1f}M", cfg, flush=True)
 
 delay = tuple(int(v) for v in args.delay.split(","))
@@ -82,13 +87,50 @@ def hnet_ratio(Fr, Gm, N):
     return N / (N - 1) * ((N - 1) * Fr * Gm + (1 - Fr) * (1 - Gm))
 
 
+@torch.no_grad()
+def front_long(B, T, ev):
+    """frozen front over a long clip, piece by piece (state carried): pooled frame vectors for the temporal model, the
+    event/fovea masks, and the cells picked for the forward model (same mix as below: changing, uniform, exits)"""
+    fs, bs, us, picks, state = [], [], [], [], None
+    for a in range(0, T, args.chunk):
+        e = min(T, a + args.chunk); L = e - a
+        fr, cl = sampler.render_range(a, e + 1)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            f, fi, state = model.front(fr[:, :L], t0=a, state=state)
+        fs.append(f); bs.append(fi["b"]); us.append(fi["use"])
+        cc, cn, co = to_cells(cl[:, :L]), to_cells(cl[:, 1:]), to_cells(fr[:, :L])
+        chg = ((cn - cc).abs().mean((-1, -2, -3)) > 0.01).flatten().nonzero()[:, 0]
+        n = max(1, args.n_dec // 2 * L // T)
+        pk = [torch.randint(0, B * L * G * G, (n,), device="cuda")]
+        if len(chg):
+            pk.append(chg[torch.randint(0, len(chg), (n,), device="cuda")])
+        if args.n_exit:
+            ex = ((ev[:, a:e] & EV_EXIT) > 0).flatten().nonzero()[:, 0]
+            if len(ex):
+                ne = max(1, args.n_exit * L // T)
+                pe = ex[torch.randint(0, len(ex), (ne,), device="cuda")]
+                pk.append(pe * (G * G) + torch.tensor([6, G + 6], device="cuda")[torch.randint(0, 2, (ne,), device="cuda")])
+        pick = torch.cat(pk)
+        bi, tl, ji = pick // (L * G * G), (pick // (G * G)) % L, pick % (G * G)
+        picks.append((bi, tl + a, ji, fi["cell"][bi, tl, ji], co[bi, tl, ji], cn[bi, tl, ji]))
+    cat = lambda i: torch.cat([q[i] for q in picks])
+    return torch.cat(fs, 1), dict(b=torch.cat(bs, 1), use=torch.cat(us, 1)), [cat(i) for i in range(6)]
+
+
 def step_loss(frames, clean, act, ev):
-    B, T = frames.shape[0], frames.shape[1] - 1
-    obs = frames[:, :T]
+    B, T = act.shape[0], act.shape[1] - 1
     prev_act = torch.cat([torch.zeros_like(act[:, :1]), act[:, : T - 1]], 1)
     if args.act_drop > 0:
         prev_act = prev_act * (torch.rand_like(prev_act[..., :1]) > args.act_drop)
-    with torch.autocast("cuda", dtype=torch.bfloat16):
+    if args.freeze_front:
+        f, fi, (bi, ti_, ji, cel, cur, tgt) = front_long(B, T, ev)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            h, ti = model.temporal(None, prev_act, x_lat=f)
+            pol, z = model.temporal.heads(h, act[:, :T])
+            pred, logv = model.cdec(z[bi, ti_], cel, ji, cur, with_var=True)
+    else:
+      obs = frames[:, :T]
+      with torch.autocast("cuda", dtype=torch.bfloat16):
         h, fi, ti, _ = model(obs, prev_act)
         pol, z = model.temporal.heads(h, act[:, :T])
         # forward model on sampled cells: half among cells that change at t+1, half uniform
@@ -108,7 +150,7 @@ def step_loss(frames, clean, act, ev):
         bi, ti_, ji = pick // (T * G * G), (pick // (G * G)) % T, pick % (G * G)
         cur = to_cells(obs)[bi, ti_, ji]
         pred, logv = model.cdec(z[bi, ti_], fi["cell"][bi, ti_, ji], ji, cur, with_var=True)
-    tgt = cn[bi, ti_, ji]
+      tgt = cn[bi, ti_, ji]
     err = ((pred.float() - tgt) ** 2).mean((1, 2, 3))
     mse = err.mean()
     # heteroscedastic Gaussian NLL per cell: unpredictable cells (noisy TV) get a large variance and stop dominating
@@ -136,10 +178,10 @@ def step_loss(frames, clean, act, ev):
     # ratio losses: temporal stages + spatial cell router + fovea
     ratio_t = sum(i["ratio_loss"] for i in ti if i["ratio_loss"] is not None) if any(i["ratio_loss"] is not None for i in ti) else torch.zeros((), device=h.device)
     ratio_s = torch.zeros((), device=h.device)
-    b, pr = fi["b"], fi["p"]
-    if args.router in ("tied", "rel"):
+    b, pr = fi["b"], fi.get("p")
+    if args.router in ("tied", "rel") and not args.freeze_front:
         ratio_s = ratio_s + hnet_ratio(b.float().mean(), pr.float().mean(), args.N_cell)
-    if args.fovea == "learned" and args.fov_credit == "ste" and fi["use"].any() and not model.front.force_fovea:
+    if args.fovea == "learned" and args.fov_credit == "ste" and not args.freeze_front and fi["use"].any() and not model.front.force_fovea:
         ratio_s = ratio_s + fi["gate_soft"][fi["use"]].float().mean()  # small pull on selected scores: useless picks rotate out
     task = a_mse + 0.1 * a_ang + args.w_dec * 0.1 * a_dec + 0.1 * g_bce
     loss = args.w_pix * nll + task + args.alpha * ratio_t + args.alpha_s * ratio_s
@@ -147,7 +189,7 @@ def step_loss(frames, clean, act, ev):
     if main_l is not None:
         loss = loss + args.w_main * main_l
     fov_loss = torch.zeros((), device=h.device)
-    if args.fovea == "learned" and args.fov_credit == "task":
+    if args.fovea == "learned" and args.fov_credit == "task" and not args.freeze_front:
         # value of high resolution per event cell = -d(action losses)/d(gate), first order, pixels excluded: the noisy TV
         # helps next-frame pixels but not actions. RMS-normalised per batch; the score regresses its conditional mean
         gate, ev_m = fi["fov_gate"], b
@@ -190,7 +232,7 @@ for s in range(args.steps):
             sampler = ClipSampler(st_, T_, seed=args.seed + s0, rule_fixed=(r_ == "fixed"))
             B, focus = B_, f_
             print(f"stage: step {s} -> T {T_} B {B_} focus {f_} rule {r_}", flush=True)
-    frames, clean, act, ev = sampler.sample(B, focus=focus)
+    frames, clean, act, ev = sampler.sample(B, focus=focus, render=not args.freeze_front)
     loss, m = step_loss(frames, clean, act, ev)
     opt.zero_grad(set_to_none=True)
     loss.backward()

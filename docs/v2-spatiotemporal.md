@@ -180,9 +180,47 @@ Both runs use the pair rule, pop exits (256 exit cells per step) and the task-cr
   without, and the item's colour is not in h. Hour-long streams stay at chance: training clips hold at most 2,048
   frames and one or two flashes, while an hour holds about 30 flashes, all in the memory.
 - **`--w_main 1` hurt.** The next-token loss flowed back into the token encoders and overrode task features: the
-  glyph half fell from 0.99 to 0.47, and the policy did not recover in training. Queued:
-  - `--main_detach`: the loss trains only the main network, on a second pass over detached tokens;
-  - `--w_main 0.1`.
+  glyph half fell from 0.99 to 0.47, and the policy did not recover in training.
+- **Milder versions did not help either** (`st_pp_md`: `--w_main 0.3 --main_detach`, the loss trains main only;
+  `st_pp_m01`: `--w_main 0.1`):
+
+  | | st_pp | st_pp_md | st_pp_m01 |
+  |---|---|---|---|
+  | rule half, 2k, age 0–600 / 600–1500 / 1500–3000 | 0.71 / 0.58 / 0.33 | 0.50 / 0.21 / 0.00 | 0.69 / 0.40 / 0.00 |
+  | rule half, 2k, all (main removed) | 0.64 (0.50) | 0.51 (0.48) | 0.52 (0.47) |
+  | rule half, hour | 0.54 | 0.56 | 0.52 |
+  | glyph half, 2k | 0.99 | 0.71 | 0.99 |
+  | colour probe in h at the lamp (main removed) | 0.22 (0.21) | 0.21 (0.15) | 0.32 (0.17) |
+  | L2 task-start recall, hour (random) | 0.59 (0.19) | 0.28 (0.23) | 0.85 (0.16) |
+
+  The weak loss sharpens L2 boundaries (task recall 0.85) and puts a little colour into h (0.32 against 0.25
+  chance), but rule decisions do not improve. A loss on the main network is not what limits memory here; the
+  length of the training clips is (next section).
+
+### Long clips on a frozen front (`--freeze_front`, `run_st5.sh`, `run_st6.sh`)
+
+The v5 lesson (memory reaches as far as the training clips) applied to v2. `--freeze_front` freezes the sparse
+front and runs it in 2,048-frame pieces under no_grad, carrying its state. The temporal model then trains on
+16,384-frame clips, each holding about 10 rule flashes (5 GB, 0.7 s/step). All runs: 4,000 steps from the round-1
+checkpoint. Held-out hour streams, rule half of decisions by flash age (chance 0.5; n = 192, heuristic rows n = 177 without pop exits):
+
+| run | clips | 0–600 | 600–1500 | 1500–3000 | all (main removed) |
+|---|---|---|---|---|---|
+| st_pp (round 1) | 2k | 0.54 | 0.55 | 0.42 | 0.54 (0.47) |
+| st_pp_L2 (control: same frames per step) | 2k × 8 | **0.17** | 0.77 | 0.92 | 0.55 (0.48) |
+| **st_pp_L16** | 16k | 0.55 | **0.85** | 0.29 | **0.66** (0.54) |
+| st_pair_heur (round 1, heuristic front) | 2k | 0.46 | 0.61 | 0.65 | 0.55 (0.49) |
+| st_heur_L16 | 16k | 0.61 | 0.75 | 0.46 | **0.65** (0.53) |
+
+- **Long clips help on hour streams** (0.54 → 0.66 learned front, 0.55 → 0.65 heuristic front), and the gain goes
+  through the main network (removing it gives 0.53–0.54). The 2k control with the same compute stays at 0.55.
+- **The control shows a stale rule.** Every flash flips the rule, so 0.17 just after a flash means the model still
+  applies the previous rule, and switches only 600+ frames later. 2k clips hold at most one flash, so the model
+  never learned that a newer flash overrides an older one. 16k clips reduce this, but no run updates on the flash
+  itself; decisions 0–600 frames after a flash stay near chance.
+- On 2k streams (at most one flash) long clips do not help (0.56 vs 0.64, within noise), as expected.
+- The front still limits the learned run: it puts high resolution on the rule cell on 60% of flashes (hour) and
+  28% (2k), and the frozen front cannot improve.
 
 ### What holds so far
 

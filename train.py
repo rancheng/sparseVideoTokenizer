@@ -35,6 +35,8 @@ p.add_argument("--act_drop", type=float, default=0.0, help="drop a_{t-1} input p
 p.add_argument("--router", default="cos", choices=["cos", "tied"])
 p.add_argument("--alibi", action="store_true", help="time-recency bias in the main network")
 p.add_argument("--mem_read", action="store_true", help="per-frame cross-attention into main-network memory")
+p.add_argument("--sparse_read", type=int, default=0, help="native LSA memory read: entries read per frame by content (0 = all)")
+p.add_argument("--sparse_rec", type=float, default=0.0, help="native LSA read: recency term in the bucket score")
 p.add_argument("--mem_src", default="out", choices=["out", "tok"], help="memory entries: main outputs, or event token + output")
 p.add_argument("--freeze_fenc", action="store_true", help="frozen frame encoder (latents without activations): long clips fit")
 p.add_argument("--router_detach", action="store_true", help="no gradient from the router into the encoder state")
@@ -49,7 +51,8 @@ chunkers = args.chunkers.split(","); Ns = [int(n) for n in args.Ns.split(",")]
 dims = [int(d) for d in args.dims.split(",")][: len(chunkers) + 1]
 cfg = dict(chunkers=chunkers, Ns=Ns, dims=dims, n_main=args.n_main, use_actions=not args.no_actions,
            heartbeats=[int(h) for h in args.heartbeats.split(",")], ratio_mode=args.ratio_mode, rate_w=args.rate_w,
-           router=args.router, alibi=args.alibi, mem_read=args.mem_read, mem_src=args.mem_src, router_detach=args.router_detach)
+           router=args.router, alibi=args.alibi, mem_read=args.mem_read, mem_src=args.mem_src, router_detach=args.router_detach,
+           sparse_read=args.sparse_read, sparse_rec=args.sparse_rec)
 model = VideoHNet(**cfg).cuda()
 if args.init:
     model.load_state_dict(torch.load(args.init)["model"])

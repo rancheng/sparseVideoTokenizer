@@ -14,6 +14,7 @@ compression -> isotropic frame transformer).
 Everything is strictly causal so the same weights run as a streaming policy.
 """
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -318,9 +319,14 @@ class MemoryRead(nn.Module):
     """Cross-attention from every frame into the main network's outputs (one per top-level event) with keys
     restricted to events at or before the frame's time and an ALiBi recency bias on elapsed frames."""
 
-    def __init__(self, d, dm, dh=64, src="out"):
+    def __init__(self, d, dm, dh=64, src="out", sparse=0, sparse_w=32, n_cluster=32, n_bucket=4, sparse_rec=0.0):
         super().__init__()
         self.h, self.dh, self.src = dm // dh, dh, src
+        # sparse=k: native Latent Sparse Attention (vt/lsa.py). Each frame reads only k entries chosen by content (bucket
+        # centroids of its own keys, Ward-clustered per block of n_cluster entries) plus the sparse_w most recent ones.
+        # The choice carries no gradient; the loss trains the keys through the entries a frame actually reads.
+        # sparse_rec: bucket score - sparse_rec * log2(1 + frames since the bucket's newest entry)
+        self.sparse, self.sparse_w, self.n_cluster, self.n_bucket, self.sparse_rec = sparse, sparse_w, n_cluster, n_bucket, sparse_rec
         self.n = RMSNorm(d)
         self.q = nn.Linear(d, dm, bias=False)
         # src="tok": each memory entry is the event token itself (main-network input) next to its main output.
@@ -341,17 +347,70 @@ class MemoryRead(nn.Module):
         k, v = self.kv(mem).view(B, L, 2, self.h, self.dh).unbind(2)
         k, v = k.transpose(1, 2), v.transpose(1, 2)
         slopes = time_slopes(self.h, h.device)
+        if self.sparse:
+            return self.o(torch.cat([self.sparse_read(q[b:b + 1], k[b:b + 1], v[b:b + 1], t[b], mt[b][mv[b]], slopes)
+                                     for b in range(B)]))
         outs = [F.scaled_dot_product_attention(q[:, :, i0:i0 + block], k, v,
                                                attn_mask=time_bias(t[:, i0:i0 + block], mt, slopes, kvalid=mv).to(q.dtype))
                 for i0 in range(0, T, block)]
         return self.o(torch.cat(outs, 2).transpose(1, 2).reshape(B, T, -1))
 
 
+    def sparse_read(self, q, k, v, t, mt, slopes, block=2048):
+        """one stream: q (1,H,T,dh), k/v (1,H,L,dh) with the valid entries first (main's tokens are packed), t (T,), mt (L',)"""
+        from vt.lsa import ward
+        H, T, L = q.shape[1], q.shape[2], mt.shape[0]
+        K, W, nc = self.sparse, self.sparse_w, self.n_cluster
+        ik = F.normalize(k[0, :, :L].transpose(0, 1).reshape(L, -1).detach().float(), dim=-1)
+        iq = F.normalize(q[0].transpose(0, 1).reshape(T, -1).detach().float(), dim=-1)
+        nmax = 2 * self.n_bucket
+        members, ends = [], []
+        kn = ik.cpu().numpy()
+        for a in range(0, (L // nc) * nc, nc):
+            for g in ward(kn[a:a + nc], nc // self.n_bucket, nmax):
+                members.append(np.pad(np.sort(g) + a, (0, nmax - len(g)), constant_values=-1)); ends.append(a + nc - 1)
+        nv = torch.searchsorted(mt.contiguous(), t.contiguous(), right=True)          # entries existing at each frame
+        w0 = (nv - W).clamp(min=0)
+        win = w0[:, None] + torch.arange(W, device=q.device)[None]
+        win_ok = win < nv[:, None]
+        if members:
+            mem = torch.as_tensor(np.stack(members), device=q.device)                  # (nb, nmax), -1 padded
+            ends = torch.as_tensor(ends, device=q.device)
+            bid = torch.arange(len(mem), device=q.device)[:, None].expand_as(mem)[mem >= 0]
+            cent = F.normalize(torch.zeros(len(mem), ik.shape[1], device=q.device).index_add_(0, bid, ik[mem[mem >= 0]]), dim=-1)
+            t_new = mt[mem.max(1).values]
+            P = min(K, len(mem))
+            sel, sel_ok = [], []
+            for i0 in range(0, T, block):
+                s = iq[i0:i0 + block] @ cent.T
+                if self.sparse_rec:
+                    s = s - self.sparse_rec * torch.log2(1 + (t[i0:i0 + block, None] - t_new[None]).float().clamp(min=0))
+                s = s.masked_fill(ends[None] >= nv[i0:i0 + block, None], -float("inf"))   # completed blocks only
+                sv, top = s.topk(P, dim=-1)
+                cand = mem[top].flatten(1)                                             # best bucket first
+                ok = (cand >= 0) & torch.isfinite(sv).repeat_interleave(nmax, 1) & (cand < w0[i0:i0 + block, None])  # window: already read
+                ok = ok & (ok.cumsum(1) <= K)
+                sel.append(cand.clamp(min=0)); sel_ok.append(ok)
+            idx = torch.cat([torch.cat(sel), win.clamp(max=L - 1)], 1)
+            ok = torch.cat([torch.cat(sel_ok), win_ok], 1)
+        else:
+            idx, ok = win.clamp(max=max(0, L - 1)), win_ok
+        # training: the selection as a mask over dense logits (same result as gathering the selected entries, and the
+        # gradient still reaches only the entries read); fast at clip scale, where every frame's memory fits
+        allowed = torch.zeros(T, L, dtype=torch.int32, device=q.device).scatter_add_(1, idx, ok.int()) > 0
+        outs = []
+        for i0 in range(0, T, block):
+            bias = time_bias(t[None, i0:i0 + block], mt[None], slopes).masked_fill(~allowed[None, None, i0:i0 + block], float("-inf"))
+            o = F.scaled_dot_product_attention(q[:, :, i0:i0 + block], k[:, :, :L], v[:, :, :L], attn_mask=bias.to(q.dtype))
+            outs.append(torch.nan_to_num(o))
+        return torch.cat(outs, 2).transpose(1, 2).reshape(1, T, -1)
+
+
 class VideoHNet(nn.Module):
     def __init__(self, chunkers=("learned", "learned"), Ns=(4, 4), dims=(256, 384, 512), n_outer=2, n_main=8,
                  window=64, use_actions=True, heartbeats=(64, 256), ratio_mode="target", rate_w=0.0,
                  router="cos", alibi=False, mem_read=False, mem_src="out", router_detach=False, frame_io=True,
-                 main_pred=False, main_pred_detach=False):
+                 main_pred=False, main_pred_detach=False, sparse_read=0, sparse_rec=0.0):
         super().__init__()
         self.use_actions, self.mem_read = use_actions, mem_read
         d0 = dims[0]
@@ -368,7 +427,7 @@ class VideoHNet(nn.Module):
         self.body = net
         if mem_read:  # every frame reads the main network's memory (written only at events), causally by time
             dm = dims[len(chunkers)]
-            self.read = MemoryRead(d0, dm, src=mem_src)
+            self.read = MemoryRead(d0, dm, src=mem_src, sparse=sparse_read, sparse_rec=sparse_rec)
         self.policy = nn.Sequential(RMSNorm(d0), nn.Linear(d0, d0), nn.SiLU(), nn.Linear(d0, 3))
         self.fwd = nn.Sequential(RMSNorm(d0), nn.Linear(d0, d0), nn.SiLU(), nn.Linear(d0, d0))
 

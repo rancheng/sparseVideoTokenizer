@@ -266,8 +266,9 @@ class ClipSampler:
         self.rng = np.random.default_rng(seed)
         self.dev = device
 
-    def sample(self, B, focus=0.0):
-        """focus: fraction of clips placed so that a decision frame lies in their second half (rare-event replay)."""
+    def sample(self, B, focus=0.0, render=True):
+        """focus: fraction of clips placed so that a decision frame lies in their second half (rare-event replay).
+        render=False: frames come later, piece by piece, from render_range (long clips that do not fit as pixels)."""
         T = self.T
         envs = self.rng.integers(0, self.E, B)
         t0s = self.rng.integers(0, self.N - T - 1, B)
@@ -282,8 +283,12 @@ class ClipSampler:
         idx_t = t0s[:, None] + np.arange(T + 1)[None]
         sub = {k: v[envs[:, None], idx_t].reshape((B * (T + 1),) + v.shape[2:]) for k, v in self.st.items() if k != "tv_cell"}
         sub["tv_cell"] = np.repeat(self.st["tv_cell"][envs], T + 1, 0)
-        frames, clean = self.r(sub)
-        frames = frames.view(B, T + 1, 3, H, W); clean = clean.view(B, T + 1, 3, H, W)
+        if render:
+            frames, clean = self.r(sub)
+            frames = frames.view(B, T + 1, 3, H, W); clean = clean.view(B, T + 1, 3, H, W)
+        else:
+            frames = clean = None
+            self._sub = {k: v.reshape((B, T + 1) + v.shape[1:]) for k, v in sub.items()}
         tt = lambda k: torch.as_tensor(sub[k], device=self.dev).view(B, T + 1, *sub[k].shape[1:])
         act, ev = tt("action"), tt("events")
         # a carry decision is answerable when the latest rule flash lies inside the clip (or the rule is fixed)
@@ -296,3 +301,10 @@ class ClipSampler:
         self.last_agent = tt("agent")
         self.last_tv = torch.as_tensor(self.st["tv_cell"][envs], device=self.dev)
         return frames, clean, act, ev
+
+    def render_range(self, a, b):
+        """frames a..b-1 of every clip of the last sample(render=False) -> noisy, clean (B,b-a,3,H,W)"""
+        sub = {k: v[:, a:b].reshape((-1,) + v.shape[2:]) for k, v in self._sub.items()}
+        frames, clean = self.r(sub)
+        B = self._sub["agent"].shape[0]
+        return frames.view(B, b - a, 3, H, W), clean.view(B, b - a, 3, H, W)

@@ -226,7 +226,20 @@ appends the same entry.
 | iso_v4 | eval OOM (full attention + ALiBi bias over 36K frames) | | |
 
 - **Long gaps** (1.5k–24k frames, `hour_longgap`) stay at chance for every model, but there are only 13 queries.
-  `--freeze_fenc` long-gap fine-tuning (fixed_v5, hnet_v5) is the next test.
+- **v5: long-gap fine-tuning fixes them.** `--freeze_fenc` frees the frame encoder's activations, so the temporal
+  model trains on 16,384-frame clips (batch 1, cue→query gaps 1.5k–12k, 6,000 steps from v4). Held-out
+  `hour_longgap`, 24 envs (chance 25%):
+
+  | run | gap 1.5k–6k (n = 12) | 6k–18k (n = 39) | > 18k (n = 7) | dynamic PSNR |
+  |---|---|---|---|---|
+  | hnet_v4 | 42% | 18% | 43% | 36.16 |
+  | fixed_v4 | 17% | 18% | 43% | 36.45 |
+  | **hnet_v5** | **100%** | **56%** | 57% | 36.68 |
+  | fixed_v5 | 92% | 54% | 43% | 36.69 |
+
+  Memory reaches as far as the training clips do: gaps inside the 12k training range are recalled, gaps beyond it
+  only partly. Learned chunking is as good as fixed or slightly better. The mechanism was never the problem; the
+  clips were too short to contain the gap.
 - **`--router_detach`** (the ratio loss no longer shapes the encoder) did not make the L2 router learn: its AUC for
   action events stays 0.50–0.55, while the L1 state change alone gives 0.86 and the L2 input 0.76.
 
@@ -245,3 +258,11 @@ So on this stream the dense loss is solved by the local stages. On text, next-by
 
 This motivated v2 (`docs/v2-spatiotemporal.md`): a testbed where the dense loss does depend on long memory, and a
 front end that is sparse in space as well as time.
+
+## Latent Sparse Attention on the memory read
+
+See [lsa-experiments.md](lsa-experiments.md). Content-only bucket selection collapses as memory grows (0.76 → 0.36 at
+15 h of history, full read 0.74); a log-recency term in the bucket score restores it with 40 entries read per frame.
+Native sparse training showed no reliable gain across two seeds. An interactive report of all results is published as a
+claude.ai artifact (private to the owner).
+
