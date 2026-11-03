@@ -136,6 +136,17 @@ class SparseFront(nn.Module):
         a = F.scaled_dot_product_attention(q[:, None], k[:, None], v[:, None])[:, 0]
         return self.out(a.reshape(N, -1))
 
+    def encode_dense(self, frames):
+        """every cell at full resolution, one frame at a time (no temporal state): (B,N,3,H,W) -> (B,N,J,d).
+        The JEPA target encoder (an EMA copy of this front) uses it on the frames to be predicted."""
+        B, N = frames.shape[:2]
+        cells = to_cells(frames)
+        x = self.cheap(self.lowres(cells)) + self.pos + self.hires(cells.reshape(-1, 3, CELL, CELL)).view(B, N, G * G, -1)
+        x = x.reshape(B * N, G * G, -1)
+        for blk in self.blocks:
+            x = blk(x)
+        return self.norm(x).view(B, N, G * G, -1)
+
     def forward(self, frames, t0=0, state=None):
         """frames (B,T,3,128,128). state: carried from a previous chunk (exact chunked processing of long streams).
         Returns frame vectors (B,T,dout), info, new state."""
@@ -277,9 +288,11 @@ class CellDecoder(nn.Module):
 class SparseVideoModel(nn.Module):
     """Sparse front end -> temporal H-Net (frame-level chunking, main network, event-token memory) -> heads."""
 
-    def __init__(self, front=None, temporal=None):
+    def __init__(self, front=None, temporal=None, n_dom=0):
         super().__init__()
         front = dict(front or {}); temporal = dict(temporal or {})
+        # n_dom: one learned embedding per source dataset (camera, robot, action space) added to the frame vector
+        self.dom = nn.Embedding(n_dom, temporal.get("dims", (256,))[0]) if n_dom else None
         self.front = SparseFront(**front)
         temporal.setdefault("dims", (256, 384, 512))
         self.temporal = VideoHNet(frame_io=False, **temporal)
@@ -293,7 +306,9 @@ class SparseVideoModel(nn.Module):
         a = (self.ang(h).argmax(-1).float() + 0.5) * (2 * torch.pi / self.n_ang) - torch.pi
         return torch.stack([a.cos(), a.sin()], -1)
 
-    def forward(self, frames, prev_act, t0=0, state=None):
+    def forward(self, frames, prev_act, t0=0, state=None, dom=None):
         x, finfo, fstate = self.front(frames, t0, state)
+        if self.dom is not None and dom is not None:
+            x = x + self.dom(dom)[:, None].to(x.dtype)
         h, infos = self.temporal(None, prev_act, x_lat=x)
         return h, finfo, infos, fstate

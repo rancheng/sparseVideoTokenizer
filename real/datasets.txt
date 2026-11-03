@@ -1,0 +1,17 @@
+pusht observation.image fixed
+columbia_cairlab_pusht_real observation.images.image fixed
+aloha_static_cups_open observation.images.cam_high fixed
+aloha_static_coffee observation.images.cam_high fixed
+droid_100 observation.images.exterior_image_1_left fixed
+berkeley_autolab_ur5 observation.images.image fixed
+toto observation.images.image fixed
+jaco_play observation.images.image fixed
+utaustin_mutex observation.images.image fixed
+fmb observation.images.image_side_1 fixed
+berkeley_fanuc_manipulation observation.images.image fixed
+taco_play observation.images.rgb_static fixed
+iamlab_cmu_pickup_insert observation.images.image fixed
+nyu_franka_play_dataset observation.images.image fixed
+berkeley_cable_routing observation.images.top_image fixed
+aloha_mobile_cabinet observation.images.cam_high moving
+droid_100 observation.images.wrist_image_left moving

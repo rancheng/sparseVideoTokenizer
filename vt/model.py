@@ -410,15 +410,15 @@ class VideoHNet(nn.Module):
     def __init__(self, chunkers=("learned", "learned"), Ns=(4, 4), dims=(256, 384, 512), n_outer=2, n_main=8,
                  window=64, use_actions=True, heartbeats=(64, 256), ratio_mode="target", rate_w=0.0,
                  router="cos", alibi=False, mem_read=False, mem_src="out", router_detach=False, frame_io=True,
-                 main_pred=False, main_pred_detach=False, sparse_read=0, sparse_rec=0.0):
+                 main_pred=False, main_pred_detach=False, sparse_read=0, sparse_rec=0.0, act_dim=3):
         super().__init__()
         self.use_actions, self.mem_read = use_actions, mem_read
         d0 = dims[0]
         if frame_io:  # 64x64 frame encoder/decoder; off when a separate front end supplies latents (vt/model2.py)
             self.fenc = FrameEncoder(d0)
             self.fdec = FrameDecoder(d0)
-        self.act_in = nn.Linear(3, d0)
-        self.act_fwd = nn.Linear(3, d0)
+        self.act_in = nn.Linear(act_dim, d0)
+        self.act_fwd = nn.Linear(act_dim, d0)
         net = MainNet(dims[len(chunkers)], n_main, alibi, main_pred, main_pred_detach)
         self.main = net
         for lvl in reversed(range(len(chunkers))):
@@ -428,7 +428,7 @@ class VideoHNet(nn.Module):
         if mem_read:  # every frame reads the main network's memory (written only at events), causally by time
             dm = dims[len(chunkers)]
             self.read = MemoryRead(d0, dm, src=mem_src, sparse=sparse_read, sparse_rec=sparse_rec)
-        self.policy = nn.Sequential(RMSNorm(d0), nn.Linear(d0, d0), nn.SiLU(), nn.Linear(d0, 3))
+        self.policy = nn.Sequential(RMSNorm(d0), nn.Linear(d0, d0), nn.SiLU(), nn.Linear(d0, act_dim))
         self.fwd = nn.Sequential(RMSNorm(d0), nn.Linear(d0, d0), nn.SiLU(), nn.Linear(d0, d0))
 
     def encode_frames(self, frames, bs=4096):

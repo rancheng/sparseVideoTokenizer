@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from vt.env2 import simulate, ClipSampler, G, CARRY, BINS, EV_EXIT
 from vt.model2 import SparseVideoModel, to_cells
+from vt.jepa import JEPAHeads, HORIZONS
 
 p = argparse.ArgumentParser()
 p.add_argument("--name", required=True)
@@ -49,6 +50,13 @@ p.add_argument("--stages", default="", help="curriculum 'step:T:B:focus:rule,...
 p.add_argument("--freeze_front", action="store_true", help="frozen sparse front, run in chunks without activations: "
                "the temporal model trains on long clips (rule flashes and exits far apart inside one clip)")
 p.add_argument("--chunk", type=int, default=2048, help="frozen front: frames rendered and encoded per piece")
+p.add_argument("--obj", default="pix", choices=["pix", "jepa"], help="pix: per-cell next-frame decoder; jepa: action-"
+               "conditioned latent prediction at several horizons + inverse dynamics + future actions + surprise router")
+p.add_argument("--w_jepa", type=float, default=1.0)
+p.add_argument("--w_inv", type=float, default=0.5)
+p.add_argument("--w_fut", type=float, default=0.5)
+p.add_argument("--w_surp", type=float, default=0.1, help="cell router: BCE towards the cells with the largest one-step latent error")
+p.add_argument("--n_tf", type=int, default=32, help="jepa: target frames per clip")
 p.add_argument("--rule_curr", type=int, default=0, help="first N steps with a fixed rule (glyph only), then rule flashes")
 args = p.parse_args()
 
@@ -65,6 +73,7 @@ if args.init:
     model.load_state_dict(torch.load(args.init)["model"])
 if args.freeze_front:
     model.front.requires_grad_(False); model.front.eval()
+jm = JEPAHeads(model.front, temporal["dims"][0], 3).cuda() if args.obj == "jepa" else None
 print(f"params {sum(q.numel() for q in model.parameters())/1e6:.1f}M", cfg, flush=True)
 
 delay = tuple(int(v) for v in args.delay.split(","))
@@ -77,6 +86,8 @@ BINS_T = torch.as_tensor(BINS, device="cuda")
 
 rp = [q for n, q in model.named_parameters() if n.endswith(("wq.weight", "wk.weight"))]
 op = [q for n, q in model.named_parameters() if not n.endswith(("wq.weight", "wk.weight")) and not n.endswith(("beta", "log_tau"))]
+if jm is not None:
+    op += [q for q in jm.parameters() if q.requires_grad]
 sp = [q for n, q in model.named_parameters() if n.endswith(("beta", "log_tau"))]  # no weight decay on thresholds
 opt = torch.optim.AdamW([{"params": op}, {"params": rp, "lr": args.lr * 0.3}, {"params": sp, "weight_decay": 0.0}],
                         lr=args.lr, betas=(0.9, 0.95), weight_decay=0.1)
@@ -117,6 +128,50 @@ def front_long(B, T, ev):
     return torch.cat(fs, 1), dict(b=torch.cat(bs, 1), use=torch.cat(us, 1)), [cat(i) for i in range(6)]
 
 
+def jepa_loss(frames, x, h, fi, act):
+    """frames (B,T+1,...) observed frames, x (B,T,df) front frame vectors, h (B,T,dz) temporal output"""
+    B, T = h.shape[:2]; J = G * G; dev = h.device
+    tf = torch.randint(1, T + 1, (B, args.n_tf), device=dev)                     # frames to predict
+    bix = torch.arange(B, device=dev)[:, None].expand_as(tf)
+    Y = jm.targets(frames[bix, tf])                                               # (B,n,J,dc)
+    S = torch.cat([torch.zeros_like(act[:, :1]), act.cumsum(1)], 1)              # S[t] = sum a_<t
+    losses, err1 = {}, None
+    for hi, k in enumerate(HORIZONS):
+        t = tf - k; ok = t >= 0; tc = t.clamp(min=0)
+        af = torch.cat([S[bix, tf] - S[bix, tc], act[bix, tc]], -1)              # [sum a_t..a_{t'-1}, a_t]
+        n = B * args.n_tf
+        hh = h[bix, tc].reshape(n, 1, -1).expand(-1, J, -1).reshape(n * J, -1)
+        jj = torch.arange(J, device=dev).repeat(n)
+        cell = fi["cell"][bix, tc].reshape(n * J, -1) if k == 1 else None
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            pr = jm.predict(hh, jj, torch.full_like(jj, hi), af.reshape(n, 1, -1).expand(-1, J, -1).reshape(n * J, -1).to(hh.dtype), cell)
+        e = F.smooth_l1_loss(pr.float(), Y.reshape(n * J, -1), reduction="none").mean(-1).view(B, args.n_tf, J)
+        losses[k] = (e * ok[..., None]).sum() / (ok.sum() * J).clamp(min=1)
+        if k == 1:
+            err1 = torch.where(ok[..., None], e.detach(), torch.zeros_like(e))
+    l_jepa = sum(losses.values()) / len(losses)
+    # surprise router: the top 1/N_cell cells by one-step latent error are the cells that should have been events
+    l_surp = torch.zeros((), device=dev)
+    if args.router in ("tied", "rel"):
+        th = torch.quantile(err1.flatten().float(), 1 - 1 / args.N_cell)
+        p_ = fi["p"][bix, tf.clamp(max=T - 1)].float().clamp(1e-4, 1 - 1e-4)
+        l_surp = F.binary_cross_entropy(p_, (err1 >= th).float())
+    # inverse dynamics on action-free frame vectors, and future actions from h
+    k = torch.randint(1, 17, (B, args.n_tf), device=dev); t0 = torch.randint(0, T, (B, args.n_tf), device=dev)
+    t1 = (t0 + k).clamp(max=T - 1); k = t1 - t0; okk = k > 0
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        inv = jm.inv(torch.cat([x[bix, t0], x[bix, t1], jm.hz((k > 3).long() + (k > 15).long())], -1))   # gap bucket
+    l_inv = (((inv.float() - act[bix, t0]) ** 2).mean(-1) * okk).sum() / okk.sum().clamp(min=1)
+    kf = torch.tensor([4, 16, 64], device=dev)[torch.randint(0, 3, (B, args.n_tf), device=dev)]
+    tt = torch.randint(0, T, (B, args.n_tf), device=dev); ok2 = tt + kf < T
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        fu = jm.fut(torch.cat([h[bix, tt], jm.hz(1 + (kf > 4).long() + (kf > 16).long())], -1))
+    l_fut = (((fu.float() - act[bix, (tt + kf).clamp(max=T - 1)]) ** 2).mean(-1) * ok2).sum() / ok2.sum().clamp(min=1)
+    with torch.no_grad():
+        ystd = Y.float().std(dim=(0, 1, 2)).mean().item()
+    return l_jepa, l_surp, l_inv, l_fut, {f"j{k}": v.item() for k, v in losses.items()} | {"y_std": ystd}
+
+
 def step_loss(frames, clean, act, ev):
     B, T = act.shape[0], act.shape[1] - 1
     prev_act = torch.cat([torch.zeros_like(act[:, :1]), act[:, : T - 1]], 1)
@@ -131,7 +186,8 @@ def step_loss(frames, clean, act, ev):
     else:
       obs = frames[:, :T]
       with torch.autocast("cuda", dtype=torch.bfloat16):
-        h, fi, ti, _ = model(obs, prev_act)
+        x_f, fi, _ = model.front(obs)
+        h, ti = model.temporal(None, prev_act, x_lat=x_f)
         pol, z = model.temporal.heads(h, act[:, :T])
         # forward model on sampled cells: half among cells that change at t+1, half uniform
         cc, cn = to_cells(clean[:, :T]), to_cells(clean[:, 1:])
@@ -184,7 +240,14 @@ def step_loss(frames, clean, act, ev):
     if args.fovea == "learned" and args.fov_credit == "ste" and not args.freeze_front and fi["use"].any() and not model.front.force_fovea:
         ratio_s = ratio_s + fi["gate_soft"][fi["use"]].float().mean()  # small pull on selected scores: useless picks rotate out
     task = a_mse + 0.1 * a_ang + args.w_dec * 0.1 * a_dec + 0.1 * g_bce
+    jl = {}
+    if jm is not None:
+        l_jepa, l_surp, l_inv, l_fut, jl = jepa_loss(frames, x_f, h, fi, act[:, :T])
+        task = task + args.w_inv * l_inv + args.w_fut * l_fut     # what the fovea is credited for: behaviour, not pixels
+        jl.update(l_jepa=l_jepa.item(), l_surp=l_surp.item(), l_inv=l_inv.item(), l_fut=l_fut.item())
     loss = args.w_pix * nll + task + args.alpha * ratio_t + args.alpha_s * ratio_s
+    if jm is not None:
+        loss = loss + args.w_jepa * l_jepa + args.w_surp * l_surp
     main_l = model.temporal.main.pred_loss if args.w_main > 0 else None
     if main_l is not None:
         loss = loss + args.w_main * main_l
@@ -209,7 +272,7 @@ def step_loss(frames, clean, act, ev):
         comp = [(ti[0]["valid"].float().sum() / i["b"].float().sum()).item() for i in ti]
     return loss, dict(loss=loss.item(), mse=mse.item(), nll=nll.item(), a_mse=a_mse.item(), a_dec=a_dec.item(), a_ang=a_ang.item(), g_bce=g_bce.item(), ratio_t=float(ratio_t),
                       ratio_s=float(ratio_s), fov_loss=float(fov_loss), main_l=float(main_l) if main_l is not None else 0.0, ev_rate=b.float().mean().item(), hires_rate=fi["use"].float().mean().item(),
-                      tv_ev=tv_ev, tv_hr=tv_hr, dec_acc=dec_acc, comp=comp)
+                      tv_ev=tv_ev, tv_hr=tv_hr, dec_acc=dec_acc, comp=comp, **jl)
 
 
 log = []
@@ -238,10 +301,12 @@ for s in range(args.steps):
     loss.backward()
     gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     opt.step(); sched.step()
+    if jm is not None:
+        jm.update_target(model.front)
     if s % 50 == 0 or s == args.steps - 1:
         m.update(step=s, time=time.time() - t0, gn=gn.item(), mem_gb=torch.cuda.max_memory_allocated() / 1e9)
         log.append(m)
         print(json.dumps({k: (round(v, 5) if isinstance(v, float) else v) for k, v in m.items()}), flush=True)
-torch.save({"model": model.state_dict(), "cfg": cfg, "args": vars(args)}, f"{out_dir}/ckpt.pt")
+torch.save({"model": model.state_dict(), "cfg": cfg, "args": vars(args), "jepa": jm.state_dict() if jm is not None else None}, f"{out_dir}/ckpt.pt")
 json.dump(log, open(f"{out_dir}/train_log.json", "w"))
 print("done", time.time() - t0)

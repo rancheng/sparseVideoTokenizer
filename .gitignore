@@ -11,3 +11,4 @@ runs2/**/ckpt.pt
 runs2/**/*.npz
 !runs2/**/stdout.log
 runs_lsa/*.pt
+runs_real/**/ckpt.pt
