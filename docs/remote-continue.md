@@ -14,8 +14,9 @@ Read first: `README.md`, `docs/experiment-log.md`, `docs/v2-spatiotemporal.md`, 
 
 Everything is in the private Hugging Face model repo **`rancheng222/sparseVideoTokenizer`**: the working tree at
 commit time (code, docs, logs, eval results, all 52 checkpoints, about 7.5 GB) and `videoTokenizer.bundle`, a git
-bundle with the full history. Not included: `.venv`, `runs_lsa/*.pt` (LSA caches, rebuilt by `exp_lsa.py`), the
-robot video data (section 2).
+bundle with the full history. Not included: `.venv`, `runs_lsa/*.pt` (LSA caches, rebuilt by `exp_lsa.py`),
+`viz/.cache`, the robot video data (section 2), and `.gitignore` (on the Hub it would hide the checkpoints; the git
+step below restores it). Gitignored `*.log` files outside `runs*/<run>/stdout.log` were not uploaded either.
 
 ```bash
 hf auth login                                   # account rancheng222 (the repo is private)
