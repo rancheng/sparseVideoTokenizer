@@ -6,9 +6,27 @@ The experiments were moved from the RTX 4090 machine on 2026-11-03. Paths are th
 |---|---|
 | repository (git, remote `origin` = `rancheng/sparseVideoTokenizer`, private) | `/home/ubuntu/Codes/videoTokenizer` |
 | robot video data (not in git) | `/home/ubuntu/data/robot_video/{raw,prep}` |
-| checkpoints (not in git, copied over with the repository) | `runs/*/ckpt.pt`, `runs2/*/ckpt.pt`, `runs_real/*/ckpt.pt` |
+| checkpoints (not in git) | `runs/*/ckpt.pt`, `runs2/*/ckpt.pt`, `runs_real/*/ckpt.pt` |
 
 Read first: `README.md`, `docs/experiment-log.md`, `docs/v2-spatiotemporal.md`, `docs/lsa-experiments.md`.
+
+## Getting the code and checkpoints (Hugging Face, no SSH)
+
+Everything is in the private Hugging Face model repo **`rancheng222/sparseVideoTokenizer`**: the working tree at
+commit time (code, docs, logs, eval results, all 75 checkpoints, about 7.5 GB) and `videoTokenizer.bundle`, a git
+bundle with the full history. Not included: `.venv`, `runs_lsa/*.pt` (LSA caches, rebuilt by `exp_lsa.py`), the
+robot video data (section 2).
+
+```bash
+hf auth login                                   # account rancheng222 (the repo is private)
+cd /home/ubuntu/Codes/videoTokenizer            # this folder may already hold a partial copy from an aborted rsync:
+                                                # the download overwrites it with the same files
+hf download rancheng222/sparseVideoTokenizer --local-dir /home/ubuntu/Codes/videoTokenizer
+# git history: restore it from the bundle, keep GitHub as origin
+git init -q && git fetch -q videoTokenizer.bundle "refs/heads/*:refs/heads/*" && git reset -q --hard main
+git remote add origin https://github.com/rancheng/sparseVideoTokenizer.git   # push needs GitHub credentials
+```
+`hf` comes with `pip install huggingface_hub` (section 1); install that first if `hf` is missing.
 
 ## 0. Machine state when handed over
 
